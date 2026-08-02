@@ -1026,6 +1026,10 @@ ammLiquidity_:          AMMLiquidity or None # synthetic AMM offers for this pai
 ammContext:             AMMContext           # shared single/multi-path flag + 30-iteration AMM cap
 cache_:                 RevResult            # reverse-pass (in, out), reused by fwdImp
 inactive_:              bool                 # set when too many offers consumed (DoS guard)
+
+# BookOfferCrossingStep-only state
+defaultPath_:           bool                 # True for the direct path and False for auto-bridging
+qualityThreshold_:      Quality              # minimum quality accepted from a resting offer
 ```
 
 ## 5.1. `revImp` Implementation
@@ -1173,21 +1177,48 @@ Given a callback function and the previous step's debt direction, this function:
 1. Calculates transfer rates: input rate applies when the previous step redeems; output rate applies when ownerPaysTransferFee_ is set (true for offer crossings, checks and bridges)
 2. Iterates through order book offers sorted by quality (best prices first)
 3. Generates AMM offers when available and compares their quality with CLOB offers (skips AMM if domain filtering is active)
-4. For each offer, performs asset-specific validation:
+4. Before calculating amounts, detects resting offers that would directly self-cross during default-path offer crossing and marks them for permanent deletion
+5. For each remaining offer, performs asset-specific validation:
    - Creates MPToken for the offer owner if input is MPT (if it does not already exist) 
    - Validates authorization via `requireAuth` (Tokens check trust lines, MPTs check holder authorization)
    - For MPTs, validates DEX/transfer permission via `checkMPTDEX` (`canTrade` plus `canTransfer`)
    - Checks offer funding and calculates transfer fees
    - For MPT input on the first step, limits input amount to prevent issuer overflow. `MaximumAmount - OutstandingAmount` should never become negative.
-5. Calls the callback with calculated amounts (offer amount, step amount, owner gives, transfer rates)
-6. Tracks which offers should be removed (expired, unfunded, or fully consumed)
-7. Stops when the callback returns false or the book is exhausted
+6. Calls the callback with calculated amounts (offer amount, step amount, owner gives, transfer rates)
+7. Tracks which offers should be removed (self-crossable, expired, unfunded, invalid, or fully consumed)
+8. Stops when the callback returns false or the book is exhausted
 
 The callback determines how much liquidity to consume from each offer and whether to continue processing more offers.
+
+During default-path offer crossing, `BookOfferCrossingStep` checks whether the current resting offer belongs to the account on both ends of the strand and meets the quality threshold set by the new offer. When both conditions hold, the offer is treated as a direct self-cross and marked for removal. `BookPaymentStep` and auto-bridged paths do not perform this check.[^bookstep-self-cross]
+
+The check runs before normal offer processing, so the engine does not calculate a fill or invoke the callback. It deletes the entire resting offer without moving assets or reducing the new offer. Deleting the offer through `BookTip` initially changes only the working view. To make the removal permanent, the self-cross branch adds the offer key to `FlowOfferStream::permToRemove`. The Flow result reports that key to `OfferCreate`, which deletes the offer from both the crossing sandbox and the cleanup sandbox.[^booktip-permanent-removal]
+
+If self-cross removal occurs before any non-self offer has been attempted, the engine also clears `tipQuality`. The deleted offer no longer restricts iteration to its quality level, so the next offer can be considered even when its quality differs.
+
+[^bookstep-self-cross]: Self-cross detection and permanent removal in `BookOfferCrossingStep::limitSelfCrossQuality`: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookStep.cpp#L399-L454)
+
+[^booktip-step]: `TOfferStreamBase` stores a `BookTip` and delegates advancement to it: [`OfferStream.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/paths/OfferStream.h#L49-L59), [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/OfferStream.cpp#L190-L206). `BookTip::step()` deletes the current offer before finding the next one: [`BookTip.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookTip.cpp#L20-L67)
+
+[^booktip-permanent-removal]: `OfferCreate` deletes each offer reported in `removableOffers` from both sandboxes: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L459-L465)
 
 ### 5.3.1. `forEachOffer` Pseudo-Code
 
 ```python
+# This predicate captures the condition in BookOfferCrossingStep::limitSelfCrossQuality.
+# BookPaymentStep always returns False for this check.
+def isSelfCross(offer):
+    if stepType is not BookOfferCrossingStep:
+        return False
+
+    return (
+        defaultPath_
+        and offer.quality() >= qualityThreshold_
+        and strandSrc_ == offer.owner()
+        and strandDst_ == offer.owner()
+    )
+
+
 def forEachOffer(sb, prevStepDir, callback):
     # Calculate transfer rates for this book step.
     # These rates determine fees charged when crossing offers.
@@ -1208,10 +1239,15 @@ def forEachOffer(sb, prevStepDir, callback):
         elif tipQuality != offer.quality():
             # Stop when quality changes - only process same quality offers per iteration
             return STOP
-        # Handle self-crossing (offer crossing only, not payments).
-        # Removes old offers when a user's new offer would cross their existing one.
-        if is_self_cross(offer):
-            return CONTINUE
+        # Delete a resting self-offer instead of executing a trade against it.
+        # No amount comparison is involved.
+        if isSelfCross(offer):
+            offers.permRemove(offer)
+            if not offerAttempted:
+                # No liquidity has been attempted, so iteration may move to a
+                # different quality after deleting the current offer.
+                tipQuality = None
+            return CONTINUE  # offers.step() deletes the current offer and advances
 
         owner = offer.owner()
         assetIn, assetOut = offer.assetIn(), offer.assetOut()

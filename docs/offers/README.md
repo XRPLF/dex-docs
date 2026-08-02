@@ -3,9 +3,10 @@
 - [1. Introduction](#1-introduction)
     - [1.1. Offers](#11-offers)
     - [1.2. Offer Crossing](#12-offer-crossing)
-        - [1.2.1. Sell vs Buy Offers](#121-sell-vs-buy-offers)
-        - [1.2.2. Auto-bridging](#122-auto-bridging)
-        - [1.2.3. Creating the Residual Offer](#123-creating-the-residual-offer)
+        - [1.2.1. Self-Crossing](#121-self-crossing)
+        - [1.2.2. Sell vs Buy Offers](#122-sell-vs-buy-offers)
+        - [1.2.3. Auto-bridging](#123-auto-bridging)
+        - [1.2.4. Creating the Residual Offer](#124-creating-the-residual-offer)
     - [1.3. Rate Calculation](#13-rate-calculation)
         - [1.3.1. TickSize Rounding](#131-ticksize-rounding)
     - [1.4. Offer Deletion](#14-offer-deletion)
@@ -101,11 +102,29 @@ flowchart LR
 
 The fee and sequence number are applied to the base ledger view by the transactor before offer crossing begins. Both sandboxes below are built over that base view, so the fee is recorded outside of them and persists regardless of which one is applied:
 - `sb`: the crossing results, the deletions of offers consumed or removed during crossing, and the new resting offer
-- `sbCancel`: only the cleanup of unfunded or expired offers encountered during crossing
+- `sbCancel`: the deletion of offers marked for permanent removal during crossing, such as expired, already-unfunded, invalid, or directly self-crossable offers
 
-When the offer will not be placed (a `tfFillOrKill` offer that cannot fully cross, or a `tfImmediateOrCancel` offer that crosses nothing), `sbCancel` is applied instead of `sb`. This discards the crossing and placement work while keeping the fee and the cleanup of unfunded or expired offers. See [Ledger Views and Sandboxes](../transactions/README.md#5-ledger-views-and-sandboxes) for how sandboxes provide atomic state changes.
+When the offer will not be placed (a `tfFillOrKill` offer that cannot fully cross, or a `tfImmediateOrCancel` offer that crosses nothing), `sbCancel` is applied instead of `sb`. This discards the crossing and placement work while keeping the fee and permanent offer cleanup. See [Ledger Views and Sandboxes](../transactions/README.md#5-ledger-views-and-sandboxes) for how sandboxes provide atomic state changes.
 
-### 1.2.1. Sell vs Buy Offers
+### 1.2.1. Self-Crossing
+
+When a new offer would directly cross a resting offer owned by the same account, `xrpld` deletes the old offer instead of executing a trade against it. The old offer is not partially filled, and no assets are transferred between the account and itself.[^self-cross-removal]
+
+The self-cross removal rule applies when all of the following are true:
+
+1. Crossing is evaluating the default, direct path, not an auto-bridged path.
+2. The resting offer's quality is equal to or better than the new offer's quality threshold.
+3. The resting offer is owned by the account that submitted the new offer.
+
+The relative amounts of the offers are not considered. A smaller new offer can therefore delete one or more larger resting offers in full. Deleting self-owned offers does not reduce the new offer's amount and the new offer may then cross other accounts' liquidity. Any remainder may be placed on the order book normally.
+
+For an offer with the `tfPassive` flag, equal-quality resting offers do not meet the crossing threshold, so an equal-quality self-offer is not deleted by this rule. 
+
+See [`isSelfCross` in the Flow step documentation](../flow/steps.md#531-foreachoffer-pseudo-code) for the implementation logic.
+
+[^self-cross-removal]: Self-cross removal: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookStep.cpp#L399-L454). Amount-independent behavior with multiple larger resting offers: [`Offer_test.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/test/app/Offer_test.cpp#L3243-L3310)
+
+### 1.2.2. Sell vs Buy Offers
 
 An offer with the `tfSell` flag set is a **sell** offer. An offer without the `tfSell` flag is a **buy** offer.
 
@@ -157,7 +176,7 @@ Alice is willing to buy 100 XRP for her 20 USD. Bob is willing to sell his 100 X
 [^maxMPTokenAmount-mpt]: MPT maximum amount halved for transfer rate: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L440), maximum defined in [`Protocol.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/protocol/Protocol.h#L234)
 [^transfer-rate-max]: IOU transfer rate capped at 2.0 (200%): [`AccountSet.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/account/AccountSet.cpp#L128-L131)
 
-### 1.2.2. Auto-bridging
+### 1.2.3. Auto-bridging
 
 Auto-bridging allows offers between two non-XRP currencies to execute through XRP as an intermediate currency.
 
@@ -170,7 +189,7 @@ The Flow engine evaluates both paths and selects the one(s) providing the best q
 [^auto-bridging-path]: Auto-bridging path construction: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L410-L412)
 [^passive-threshold]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L394-L397)
 
-### 1.2.3. Creating the Residual Offer
+### 1.2.4. Creating the Residual Offer
 
 Before the offer is sent to the Flow engine for crossing, a **quality threshold** is calculated from `takerPays` and `takerGets`. This represents the minimum exchange rate at which the offer can be crossed. If `takerGets` is a non-XRP asset (IOU or MPT) and the offer creator is not the issuer, `takerGets` is adjusted by multiplying it by the issuer's transfer rate to account for transfer fees. The quality threshold is then calculated as `takerPays / adjusted takerGets`. For a passive offer (`tfPassive`), the threshold is then incremented so the offer crosses only strictly-better-quality offers.[^passive-threshold]
 
@@ -250,6 +269,8 @@ If `OfferSequence` is provided:
 This mechanism is useful for updating an existing offer without the risk of having both the old and new offers active simultaneously.
 
 A domain or hybrid offer (one that sets `DomainID`) can use `OfferSequence` to cancel the signing account's own regular (non-domain) offer; see [State Changes](#3112-state-changes) for the amendment-gated details.
+
+Direct [self-cross removal](#121-self-crossing) is separate from `OfferSequence`. It happens automatically during crossing and does not require the transaction to identify an offer to cancel.
 
 ## 1.5. Permissioned DEX
 
@@ -543,6 +564,7 @@ For this reason, certain `tec` outcomes are covered in the [state changes](#3112
 - `Offer` object is **deleted**:
     - If `OfferSequence` field is specified and the offer with that sequence exists, it is deleted. See [OfferCancel State Changes](#3122-state-changes) for details on the deletion process
     - When the new offer sets `DomainID` (a domain or hybrid offer), the offer cancelled via `OfferSequence` may be the signing account's own regular (non-domain) offer. Under the `fixCleanup3_2_0` amendment this is permitted; before the amendment the `ValidPermissionedDEX` invariant treated the deleted regular offer as a violation and failed the transaction with `tecINVARIANT_FAILED`.[^domain-cancel-regular]
+    - During default-path crossing, any existing offer owned by the signing account that would directly cross the new offer is deleted in full, regardless of the relative amounts. See [Self-Crossing](#121-self-crossing)
 
 
 - `Offer` object is **not created**:
