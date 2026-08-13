@@ -34,7 +34,9 @@ AMM helpers use **token** as a subject in many function names. This refers to an
 
 The `applyGuts` function[^applyGuts] is the main entry point for processing AMMWithdraw transactions. It retrieves the AMM ledger entry and the withdrawer's LP token balance, determines how many LP tokens to redeem (all tokens for `tfWithdrawAll`/`tfOneAssetWithdrawAll`, or the specified amount from `LPTokenIn`), then adjusts the LP token balance for precision if needed. The function gets the current pool balances and determines which trading fee applies to the withdrawer (regular or discounted for [auction slot holders](#3-gettradingfee)). Based on the transaction flags and provided fields, it dispatches to one of five withdrawal mode handlers (implementing seven total modes): two [multi-asset modes](#4-multi-asset-withdrawal-modes) that maintain proportional withdrawals, and three [single-asset modes](#5-single-asset-withdrawal-modes) that perform single-sided withdrawals. Each mode handler calculates the withdrawal amounts and LP tokens to burn, then calls the [common withdraw function](#6-common-withdraw-function) to execute the actual asset transfers and update the pool state. After the withdrawal, if the pool is empty (zero LP tokens), the function attempts to delete the AMM account - if successful, the AMM is fully removed; if incomplete due to remaining trust lines, the AMM remains in an empty state with the LP token balance set to zero.
 
-[^applyGuts]: AMMWithdraw::applyGuts: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L307-L422)
+Under the `fixCleanup3_3_0` amendment, the freeze rules relax as described in the [failure conditions](README.md#332-failure-conditions). In this path, an issuer withdrawing its own frozen token reads the pool balances with `IgnoreFreeze` instead of the `ZeroIfFrozen` shown in the pseudo-code below.
+
+[^applyGuts]: AMMWithdraw::applyGuts: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L336-L462)
 
 ## 2.1. applyGuts Pseudo-Code
 
@@ -522,9 +524,9 @@ Withdraw a single asset with an effective price constraint.[^singleWithdrawEPric
 
 This mode allows users to control the effective price when redeeming LP tokens, where effective price is defined as the ratio of LP tokens redeemed to asset withdrawn. The user provides `EPrice` (maximum effective price) and optionally `Amount` (minimum withdrawal amount). As with deposits, `EPrice` is an upper bound: the trade is sized so the effective price does not exceed `EPrice`. A lower effective price means a better deal for the withdrawer (fewer LP tokens per asset withdrawn).
 
-The function solves a derived formula from Equation 8 to calculate the LP tokens that achieve exactly the specified effective price. It then calculates the withdrawal amount as `tokensAdj / ePrice`. If the calculated amount is less than the user's optional `Amount` constraint, the transaction fails with `tecAMM_FAILED`.
+The function solves a derived formula from Equation 8 to calculate the LP tokens that achieve exactly the specified effective price. It then calculates the withdrawal amount as `tokensAdj / ePrice`. If the calculated amount is less than the user's optional `Amount` constraint, the transaction fails with `tecAMM_FAILED`. Under the `fixCleanup3_3_0` amendment, a denominator (`T*f - B*E`) of exactly zero also fails with `tecAMM_FAILED`. Without the amendment that division throws and the transaction fails with `tefEXCEPTION`.
 
-[^singleWithdrawEPrice]: AMMWithdraw::singleWithdrawEPrice: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L1073-L1130)
+[^singleWithdrawEPrice]: AMMWithdraw::singleWithdrawEPrice: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L1119-L1179)
 
 ### 5.3.1. singleWithdrawEPrice Pseudo-Code
 
@@ -592,7 +594,9 @@ def singleWithdrawEPrice(
 
 The `withdraw()` function[^withdraw] serves as the final common pathway for all withdrawal modes, executing the actual asset transfers after mode-specific handlers determine the withdrawal amounts.
 
-[^withdraw]: AMMWithdraw::withdraw: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L472-L709)
+Under `fixCleanup3_3_0` together with `fixAMMv1_3`, the common path also runs the pool product check described in [Precision and Rounding](helpers.md#2-precision-and-rounding). See the [failure conditions](README.md#332-failure-conditions) for the resulting `tecPRECISION_LOSS`.
+
+[^withdraw]: AMMWithdraw::withdraw: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L479-L749)
 
 This function orchestrates a sequenced validation and execution flow. It begins by verifying the withdrawer holds sufficient LP tokens to redeem, then enforces pool integrity constraints that prevent malformed states. 
 

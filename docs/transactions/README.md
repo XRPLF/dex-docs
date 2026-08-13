@@ -12,6 +12,9 @@
 - [5. Ledger Views and Sandboxes](#5-ledger-views-and-sandboxes)
   - [5.1. Atomic Application](#51-atomic-application)
   - [5.1.1. Conditional Atomicity](#511-conditional-atomicity)
+- [6. Fees and Reserves](#6-fees-and-reserves)
+- [7. Sponsorship (Sponsor Amendment, XLS-68)](#7-sponsorship-sponsor-amendment-xls-68)
+- [8. Batch Transactions (BatchV1_1 Amendment)](#8-batch-transactions-batchv1_1-amendment)
 
 # 1. Introduction
 
@@ -222,7 +225,7 @@ classDiagram
 
 Transaction processing follows a three-phase pipeline: preflight (static validation), preclaim (ledger-based validation), and doApply (execution). Each phase can fail and return an error to the client. The `Transactor` base class coordinates this flow by calling into derived transaction classes at specific validation and execution points.
 
-The table below shows all functions called during each phase. The "Implemented By" column indicates whether the function is implemented in `applySteps.cpp` (the top-level orchestrator for each phase), the `Transactor` base class (providing common behavior for all transactions), or the `Derived` transaction-specific class (e.g., `Payment`, `AMMCreate`). "Transactor (overridable)" means the base class provides a default implementation that derived classes may optionally override.
+The table below shows the main functions called during each phase. The "Implemented By" column indicates whether the function is implemented in `applySteps.cpp` (the top-level orchestrator for each phase), the `Transactor` base class (providing common behavior for all transactions), or the `Derived` transaction-specific class (e.g., `Payment`, `AMMCreate`). "Transactor (overridable)" means the base class provides a default implementation that derived classes may optionally override.
 
 | Phase         | Function                      | Implemented By            | Description                                                              |
 |---------------|-------------------------------|---------------------------|--------------------------------------------------------------------------|
@@ -236,16 +239,17 @@ The table below shows all functions called during each phase. The "Implemented B
 | **Preclaim**  | `invokePreclaim()`            | applySteps.cpp            | Orchestrates preclaim phase                                              |
 |               | `checkSeqProxy()`             | Transactor                | Validate sequence number or ticket                                       |
 |               | `checkPriorTxAndLastLedger()` | Transactor                | Check prior transaction and last ledger sequence                         |
-|               | `checkPermission()`           | Transactor                | Verify account permissions                                               |
+|               | `checkSponsor()`              | Transactor                | Validate the sponsor account and any signatureless `Sponsorship` authorization (`Sponsor` amendment) |
+|               | `invokeCheckPermission()`     | Transactor                | Verify account permissions (delegate transaction-level and granular permissions) |
 |               | `checkSign()`                 | Transactor                | Verify signature authorization                                           |
-|               | `checkFee()`                  | Transactor                | Verify sufficient balance for fee                                        |
+|               | `checkFee()`                  | Transactor                | Verify the fee payer has sufficient balance for the fee                  |
 |               | `preclaim()`                  | Derived                   | Transaction-specific ledger-based validation                             |
 | **Apply**     | `doApply()`                   | applySteps.cpp | Orchestrates apply phase                                                 |
 |               | `operator()()`                | Transactor     | Entry point, exception handling                                          |
 |               | `apply()`                     | Transactor     | Orchestrates doApply flow                                                |
 |               | `preCompute()`                | Transactor     | Per-transaction setup (validates account)                                |
 |               | `consumeSeqProxy()`           | Transactor     | Consume sequence or delete ticket                                        |
-|               | `payFee()`                    | Transactor     | Deduct transaction fee                                                   |
+|               | `payFee()`                    | Transactor     | Deduct the transaction fee from the fee payer                            |
 |               | `doApply()`                   | Derived        | **Required override** - transaction-specific execution                   |
 
 
@@ -284,8 +288,8 @@ Preflight validation is orchestrated by `Transactor::invokePreflight<T>()` which
    - Returns `true` by default (base class implementation)
 
 3. **preflight1()**: Account and fee field validation (Transactor base class method)
-   - Check `sfTicketSequence` field validity (requires `featureTicketBatch` amendment)
    - Check `sfDelegate` field validity (requires `featurePermissionDelegationV1_1` amendment)
+   - Validate the sponsor fields
    - Calls **preflight0()** internally for early sanity checks:
      - Verify transaction ID is not zero
      - Verify NetworkID matches (for networks > 1024)
@@ -294,7 +298,7 @@ Preflight validation is orchestrated by `Transactor::invokePreflight<T>()` which
    - Validate `Fee` field is XRP, non-negative, and within acceptable range
    - Check signing key validity via `preflightCheckSigningKey()`
    - Verify `AccountTxnID` and `TicketSequence` are not both present (incompatible)
-   - Check `tfInnerBatchTxn` flag validity (requires `featureBatch` amendment)
+   - Check `tfInnerBatchTxn` flag validity
 
 4. **preflightUniversal()**: Cross-cutting amount validation (Transactor base class method)
    - Runs after `preflight1()` and before the derived class's `preflight()`
@@ -353,13 +357,14 @@ Preclaim validation is divided into two phases:
 **Phase 1: Pre-signature validation** (must return NotTEC - no tec codes allowed)
 1. `checkSeqProxy`: Verify sequence number or ticket exists
 2. `checkPriorTxAndLastLedger`: Check PriorTxnID and LastLedgerSequence fields
-3. `checkPermission`: Verify delegate permissions (if sfDelegate field present); can be overridden by specific transactions for additional permission checks
-4. `checkSign`: Verify signature matches account authorization (master key, regular key, or multisig)
+3. `checkSponsor`: Verify the sponsor account exists
+4. `invokeCheckPermission`: Verify delegate permissions
+5. `checkSign`: Verify signature matches account authorization
 
 All checks before and including signature verification must return NotTEC codes. Allowing tec results before signature verification would risk fee theft, as the fee would be charged before confirming the signature is valid.
 
 **Phase 2: Post-signature validation** (can return TER including tec codes)
-1. `checkFee`: Verify account has sufficient balance for fee
+1. `checkFee`: Verify the fee payer has sufficient balance for the fee
 2. **Transaction-specific checks** (from derived class):
    - Implemented in derived class `preclaim()` method
    - Example: Payment checks if destination exists, validates paths, credentials, etc.
@@ -371,7 +376,7 @@ All checks before and including signature verification must return NotTEC codes.
 
 Transactions that fail preclaim may or may not be added to the ledger depending on the error code. The `likelyToClaimFee` flag is set to true if the preclaim result is `tesSUCCESS`, or a `tec` error code (values >= 100) **when the transaction is not being applied as a retry** (i.e. the `TapRetry` flag is not set).[^likely-to-claim-fee] Transactions with `tec` errors are added to the ledger, consume the fee, and increment the account's sequence number, even though the transaction's intended operation fails. Other error codes (`tem`, `tef`, `ter`, `tel`) result in the transaction not being added to the ledger.[^doapply-check] This distinction ensures the network is protected from spam (by charging fees for transactions that pass basic validation) while not penalizing users for transactions that fail due to malformation or other non-chargeable issues.
 
-[^likely-to-claim-fee]: likelyToClaimFee flag calculation: [`applySteps.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/applySteps.h#L216); the `tec`-and-not-retry rule lives in [`isTecClaimHardFail`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/applySteps.h#L28).
+[^likely-to-claim-fee]: likelyToClaimFee flag calculation: [`applySteps.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/applySteps.h#L216). The `tec`-and-not-retry rule lives in [`isTecClaimHardFail`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/applySteps.h#L28).
 [^doapply-check]: doApply checks likelyToClaimFee flag: [`applySteps.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/applySteps.cpp#L440-L441)
 
 ## 3.3. DoApply
@@ -402,7 +407,7 @@ Transactions that fail preclaim may or may not be added to the ledger depending 
 3. **Transactor::apply()** (base class execution):
    - Calls `preCompute()` to perform per-transaction setup (e.g. validating the account)
    - Calls `consumeSeqProxy()` to consume sequence or delete ticket
-   - Calls `payFee()` to deduct transaction fee
+   - Calls `payFee()` to deduct the transaction fee from the fee payer
    - Updates AccountTxnID if present
    - Calls derived class `doApply()` for transaction-specific logic
 
@@ -501,7 +506,7 @@ PaymentSandbox maintains two tracking systems:
 
 2. **Deferred credits table (`tab_`)**: Tracks metadata for query purposes during transaction execution:
    - Credits, debits, self-debits, and original balances (for XRP, tokens, and MPTs)
-   - Maximum owner count seen per account
+   - Maximum owner counts seen per account
 
 **Hooks for Balance Management:**
 
@@ -523,7 +528,7 @@ Accounts in a payment are not allowed to use assets acquired during that payment
 
 Accounts cannot use freed reserves acquired during the transaction's execution. PaymentSandbox enforces this through:
 
-- `ownerCountHook(account, count)`: Returns the **maximum** `OwnerCount` the account has reached during the transaction's execution (tracked in `tab_`), not the current value. When calculating available balance (via `xrpLiquid`), this ensures freed reserves cannot be used mid-transaction.
+- `ownerCountHook(account, count)`: Returns the **maximum** owner counts the account has reached during the transaction's execution (tracked in `tab_`), not the current values. When calculating available balance (via `xrpLiquid`), this ensures freed reserves cannot be used mid-transaction. With the `Sponsor` amendment, the owner, sponsored, and sponsoring counters are tracked together as a group.
 
 - `adjustOwnerCountHook(account, cur, next)`: Records owner count changes in `tab_` to maintain the maximum value across all nested payment sandboxes.
 
@@ -580,3 +585,25 @@ else
 [^conditional-atomicity]: Conditional atomicity pattern in OfferCreate: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L969-L990)
 
 [^balanceHook]: Balance hook description from source comments: [`ReadView.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/ledger/ReadView.h#L149-L153)
+
+# 6. Fees and Reserves
+
+Every transaction destroys a small amount of XRP as its fee. The minimum fee derives from the network's base fee and grows with load and with the number of signatures. The fee is checked in preclaim (`checkFee`) and deducted during apply (`payFee`), and it is charged even when the transaction fails with a `tec` code (see [section 4](#4-transaction-result-codes)).[^fees]
+
+Reserves are XRP an account must hold but cannot spend: a base reserve for the account itself plus one owner reserve increment for each object it owns. Reserves are not consumed. They gate creation: a transaction that would create an object fails unless the owner's balance covers the increased requirement. The per-object documents describe who bears each object's reserve.[^reserves]
+
+# 7. Sponsorship (Sponsor Amendment, XLS-68)
+
+The `Sponsor` amendment (XLS-68) lets a sponsor account pay another account's fees and cover its reserves. A transaction opts in with the common `Sponsor` and `SponsorFlags` fields, choosing fee sponsorship, reserve sponsorship, or both. The sponsor approves by co-signing the transaction (`SponsorSignature`) or in advance through a standing `Sponsorship` ledger entry, managed with the `SponsorshipSet` and `SponsorshipTransfer` transactions. The pipeline hooks are described in [section 3](#3-transaction-processing-pipeline).[^sponsorship]
+
+With fee sponsorship, the sponsor becomes the fee payer. With reserve sponsorship, a created object records its sponsor (the `Sponsor` field on most entry types, `HighSponsor` or `LowSponsor` per trust line side) and counts against the sponsor's reserve instead of the owner's: the owner count used for reserve calculations becomes `OwnerCount - SponsoredOwnerCount + SponsoringOwnerCount`. Deletion releases the reserve against the recorded sponsor.[^sponsor-reserve]
+
+# 8. Batch Transactions (BatchV1_1 Amendment)
+
+The `BatchV1_1` amendment adds the `Batch` transaction, which wraps several inner transactions that apply together on a closed ledger. Inner transactions carry the `tfInnerBatchTxn` flag, skip individual signature checks because the outer batch's signers authorize them, and return `tef` codes where an open-ledger submission would return `tel` codes. Preflight rejects a transaction whose flag disagrees with its batch context with `temINVALID_INNER_BATCH`.[^batch]
+
+[^fees]: [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/Transactor.cpp#L448-L473), [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/Transactor.cpp#L621-L695)
+[^reserves]: [`Fees.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/Fees.h#L46-L56)
+[^sponsorship]: [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/Transactor.cpp#L175-L225), [`transactions.macro`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/detail/transactions.macro#L1168-L1195), [`ledger_entries.macro`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/detail/ledger_entries.macro#L627-L637)
+[^sponsor-reserve]: [`LedgerFormats.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/protocol/LedgerFormats.cpp#L11-L21), [`AccountRootHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/AccountRootHelpers.cpp#L142-L200), [`AccountRootHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/AccountRootHelpers.cpp#L229-L266), [`AccountRootHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/AccountRootHelpers.cpp#L359-L378)
+[^batch]: [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/Transactor.cpp#L282-L290), [`TER.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/TER.h#L180-L181)

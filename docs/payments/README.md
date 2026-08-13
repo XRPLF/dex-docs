@@ -87,6 +87,8 @@ When a Payment transaction creates a new destination account (destination does n
 least the base reserve amount in XRP. If the XRP amount is below the base reserve, the payment fails with
 `tecNO_DST_INSUF_XRP`.
 
+Under the `Sponsor` amendment, a payment carrying the `tfSponsorCreatedAccount` flag can create the destination account with any positive XRP amount, as small as one drop. The source account then sponsors the new account's base reserve (see the [transactions documentation](../transactions/README.md)).
+
 ## 2.2. RippleState Ledger Entry
 
 See [Trust Lines Documentation](../trust_lines/README.md#21-ripplestate-ledger-entry) for complete details on
@@ -148,7 +150,8 @@ When `build_path` is `true`:
 
 **Static validation**[^static-validation]
 
-[^static-validation]: Static validation (preflight): [`checkExtraFeatures`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L86-L93), [`getFlagsMask`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L97-L109), [`preflight`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L113-L272)
+[^static-validation]: Static validation (preflight): [`checkExtraFeatures`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L86-L93), [`getFlagsMask`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L97-L109), [`preflight`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L113-L287)
+[^sponsor-created-account]: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L125-L138), [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L399-L423), [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L495-L521)
 
 The following preflight failure conditions apply. Cases that depend on a specific amendment are noted inline:
 
@@ -156,12 +159,17 @@ The following preflight failure conditions apply. Cases that depend on a specifi
     - transaction contains `sfCredentialIDs` and the [Credentials](https://xrpl.org/resources/known-amendments#credentials) amendment is not enabled.
     - transaction contains `sfDomainID` and the [PermissionedDEX](https://xrpl.org/resources/known-amendments#permissioneddex) amendment is not enabled.
     - `Amount` is an MPT and the [MPTokensV1](https://xrpl.org/resources/known-amendments#mptokensv1) amendment is not enabled.
-- `temINVALID_FLAG`: transaction flags contain invalid flags for the payment type.
+    - transaction contains `tfSponsorCreatedAccount` and the `Sponsor` amendment is not enabled.
+- `temINVALID_FLAG`:
+    - transaction flags contain invalid flags for the payment type.
+    - `tfSponsorCreatedAccount` is combined with `tfNoRippleDirect`, `tfPartialPayment`, or `tfLimitQuality`.
+- `temINVALID`: `tfSponsorCreatedAccount` with a `SendMax` or `Paths` field.[^sponsor-created-account]
 - `temMALFORMED`:
     - `sfCredentialIDs` array is empty or exceeds maximum size of 8. To leave credential IDs out, leave out the entire field.
     - `sfCredentialIDs` array contains duplicate credential IDs
     - `sfDomainID` is present but is all zeros. To omit the domain, leave out the entire field. Enforced under the `fixCleanup3_2_0` amendment.[^domainid-zero]
 - `temBAD_AMOUNT`:
+    - `Amount` is not XRP and the `tfSponsorCreatedAccount` flag is set.
     - `Amount` is XRP and mantissa is bigger than `100000000000000000ull`.
     - `SendMax` is XRP and mantissa is bigger than `100000000000000000ull`.[^isLegalNet-sendmax]
     - `SendMax` is specified but is negative or zero.
@@ -182,7 +190,7 @@ The following preflight failure conditions apply. Cases that depend on a specifi
 
 **Validation against the ledger view**[^preclaim-validation]
 
-[^preclaim-validation]: Validation against ledger view (preclaim): [`checkPermission`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L276-L312), [`preclaim`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L315-L402)
+[^preclaim-validation]: Validation against ledger view (preclaim): [`checkGranularSemantics`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L290-L356), [`preclaim`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L359-L469)
 [^isLegalNet-sendmax]: Both Amount and SendMax checked via isLegalNet: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L160)
 [^delivermin-checks]: DeliverMin checked for legal amount and positive value: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L247-L266)
 [^domainid-zero]: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L128-L132)
@@ -190,12 +198,14 @@ The following preflight failure conditions apply. Cases that depend on a specifi
 
 - Destination account does not exist:
     - `tecNO_DST`: payment is not XRP
-    - `telNO_DST_PARTIAL`: `tfPartialPayment` flag is set. User cannot fund a new account with a partial payment.
-    - `tecNO_DST_INSUF_XRP`: XRP amount is below reserve.
+    - `telNO_DST_PARTIAL`: `tfPartialPayment` flag is set (XRP payments, since a non-XRP payment fails with `tecNO_DST` first). User cannot fund a new account with a partial payment. Inside a batch (parent batch ID present with `BatchV1_1` enabled), this returns `tefNO_DST_PARTIAL` instead.
+    - `tecNO_DST_INSUF_XRP`: XRP amount is below reserve (waived when `tfSponsorCreatedAccount` is set: any positive amount funds the account and the source sponsors its base reserve).
+    - `tecNO_SPONSOR_PERMISSION`: `tfSponsorCreatedAccount` is set but the destination account already exists.
 - `tecDST_TAG_NEEDED`: destination account has `lsfRequireDestTag` flag set and transaction did not specify `DestinationTag` field.
 - `telBAD_PATH_COUNT`:
     - the `Paths` field contains more than 6 paths.
     - any `Path` in `Paths` has more than 8 elements.
+    - Inside a batch (parent batch ID present with `BatchV1_1` enabled), these cases return `tefBAD_PATH_COUNT` instead.
 - `tecBAD_CREDENTIALS`: Credential validation failed:
     - Any credential ID in `sfCredentialIDs` doesn't exist in the ledger
     - Any credential doesn't belong to the source account
@@ -204,17 +214,18 @@ The following preflight failure conditions apply. Cases that depend on a specifi
 - `terNO_DELEGATE_PERMISSION`: Transaction specifies a delegate but:
     - The delegate authorization doesn't exist in the ledger
     - The delegate doesn't have transaction-level permission for Payment
-    - For granular permissions: the payment is not a direct payment (has `Paths` or `SendMax` with different asset), OR
-    - For granular permissions: neither PaymentMint (when source is issuer) nor PaymentBurn (when destination is issuer) permission is granted
+    - For granular permissions (`PaymentMint`/`PaymentBurn`, `PermissionDelegationV1_1` amendment): the transaction carries a field or flag outside the granular templates (for example `DeliverMin`, `DomainID`, `Paths`, or any non-universal flag), or `SendMax` names a different asset than `Amount`, or `Amount` is XRP
+    - For granular permissions with an IOU `Amount`: the issuer is not one of the two endpoints, or the trust line between source and destination does not exist, or `PaymentMint` is held but the payment redeems (the destination's trust limit is not positive or the source currently holds the destination's IOUs), or `PaymentBurn` is held but the source is not currently the holder
+    - For granular permissions with an MPT `Amount`: `PaymentMint` requires the source to be the MPT issuer and `PaymentBurn` requires the destination to be the MPT issuer
 
 **Validation during doApply**
 
 **Direct XRP Payments:**[^direct-xrp-payment]
 
-[^direct-xrp-payment]: Direct XRP payment execution: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L594-L679)
+[^direct-xrp-payment]: Direct XRP payment execution: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L682-L763)
 
 - `tefINTERNAL`: Source account does not exist.
-- `tecUNFUNDED_PAYMENT`: sending the payment would leave the source account below its required reserve. When the source account is the fee payer, it must also be able to cover the fee, which may be drawn from the reserve; in a delegated payment the delegate pays the fee, so it is not charged against the source.
+- `tecUNFUNDED_PAYMENT`: sending the payment would leave the source account below its required reserve. Under the `Sponsor` amendment the reserve is sponsorship-aware: objects covered by a sponsor stop counting, and objects or accounts the source sponsors are added. When the source is the fee payer, it must cover `Amount` plus the larger of the reserve and the fee. When the fee payer is a delegate or a fee sponsor, the source covers only `Amount` plus the reserve.
 - `tecNO_PERMISSION`: Destination is a pseudo-account.
 - If the destination has the `lsfDepositAuth` flag set:
     - Payment succeeds if source == destination (paying yourself)
@@ -247,6 +258,7 @@ The following preflight failure conditions apply. Cases that depend on a specifi
         - `Account`: Destination account ID
         - `Balance`: Payment amount
         - `Sequence`: the sequence of the ledger in which the account is created
+        - `Sponsor`: Set to the source account (only with `tfSponsorCreatedAccount`; the source's `SponsoringAccountCount` is incremented)[^sponsor-created-account]
 
 **Cross-Currency Payments:**
 
@@ -314,7 +326,7 @@ Direct XRP payments are the simplest payment type, transferring XRP directly fro
 
 **When the destination account exists**: The payment decreases the source account's `Balance` by the payment amount and increases the destination account's `Balance` by the same amount. If the destination account has the `lsfPasswordSpent` flag set, it is cleared to allow another free `SetRegularKey` transaction.
 
-**When the destination account does not exist**: A new `AccountRoot` entry is created for the destination with the payment amount as its initial balance. The account's `Sequence` is set to the current ledger sequence. The payment must meet the base reserve requirement (see [Reserves](#213-reserves)), or it fails with `tecNO_DST_INSUF_XRP`.
+**When the destination account does not exist**: A new `AccountRoot` entry is created for the destination with the payment amount as its initial balance. The account's `Sequence` is set to the current ledger sequence. The payment must meet the base reserve requirement (see [Reserves](#213-reserves)), or it fails with `tecNO_DST_INSUF_XRP`. With `tfSponsorCreatedAccount` (`Sponsor` amendment), the base reserve requirement is waived: any positive amount creates the account, the source is recorded as its sponsor, and the source's reserve requirement grows by one base reserve.
 
 All validation checks are performed before execution, including reserve requirements, deposit authorization, and destination tags. See [Failure Conditions](#311-failure-conditions) for complete validation rules.
 

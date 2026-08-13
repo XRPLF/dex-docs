@@ -1,5 +1,5 @@
 > [!NOTE]
-> This documentation reflects the XRP Ledger release [3.2.0](https://github.com/XRPLF/rippled/tree/3.2.0). Source references throughout link to that tag.
+> This documentation reflects the XRP Ledger release [3.3.0](https://github.com/XRPLF/rippled/tree/3.3.0).
 
 > [!WARNING]
 > 🚧 This documentation is **work in progress**

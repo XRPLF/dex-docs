@@ -102,7 +102,7 @@ flowchart LR
 
 The fee and sequence number are applied to the base ledger view by the transactor before offer crossing begins. Both sandboxes below are built over that base view, so the fee is recorded outside of them and persists regardless of which one is applied:
 - `sb`: the crossing results, the deletions of offers consumed or removed during crossing, and the new resting offer
-- `sbCancel`: the deletion of offers marked for permanent removal during crossing, such as expired, already-unfunded, invalid, or directly self-crossable offers
+- `sbCancel`: the deletion of offers marked for permanent removal during crossing, such as expired, already-unfunded, invalid, no-longer-in-domain, or directly self-crossable offers
 
 When the offer will not be placed (a `tfFillOrKill` offer that cannot fully cross, or a `tfImmediateOrCancel` offer that crosses nothing), `sbCancel` is applied instead of `sb`. This discards the crossing and placement work while keeping the fee and permanent offer cleanup. See [Ledger Views and Sandboxes](../transactions/README.md#5-ledger-views-and-sandboxes) for how sandboxes provide atomic state changes.
 
@@ -218,7 +218,7 @@ Both calculations preserve the original offer's quality, the `takerGets : takerP
 [^buy-offer-residual]: Buy offer residual calculation: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L527-L533)
 [^sell-offer-residual]: Sell offer residual calculation: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L501-L520)
 [^no-balance-no-offer]: No balance check after crossing: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L480-L486)
-[^offer-reserve]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L834-L844)
+[^offer-reserve]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L835-L847)
 
 ## 1.3. Rate Calculation
 
@@ -286,8 +286,11 @@ A **domain offer** is an offer created with the `DomainID` field set. Domain off
 
 A **hybrid offer** is an offer created with both the `DomainID` field set AND the `tfHybrid` flag enabled. Hybrid offers exist simultaneously in both the domain order book and the open order book, with a primary entry in the domain book and a secondary entry (via the `AdditionalBooks` field) in the open book. When a hybrid offer is created, it only crosses with offers in the domain book, since the `DomainID` is passed to the flow engine which uses that domain's order book. Once the hybrid offer is resting on the books, it can be consumed by both domain payments/offers (via the domain book entry) and open payments/offers (via the open book entry).[^hybrid-books]
 
+Under the `fixCleanup3_3_0` amendment, a resting hybrid offer's domain membership is re-validated only while the domain book is being walked. Losing domain access, for example through credential expiry, removes the offer during domain-book processing but leaves the open-book entry consumable. Without the amendment, the membership check ran during any book walk, so losing domain access also removed the hybrid offer during open-book processing.[^hybrid-eviction]
+
 [^domain-book-segregation]: [`Indexes.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Indexes.cpp#L102-L110)
-[^hybrid-books]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L560-L602)
+[^hybrid-books]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L561-L603)
+[^hybrid-eviction]: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/OfferStream.cpp#L253-L267)
 
 # 2. Ledger Entries
 
@@ -442,7 +445,7 @@ Pages form a doubly-linked list structure:
 
 [^dir-page-limit]: [`ApplyView.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/ApplyView.cpp#L124-L129)
 [^page-keylet]: [`Indexes.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Indexes.cpp#L362-L369)
-[^dir-append-insert]: [`ApplyView.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/ledger/ApplyView.h#L301-L354)
+[^dir-append-insert]: [`ApplyView.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/ledger/ApplyView.h#L326-L380)
 
 ### 2.2.3. Fields
 

@@ -257,7 +257,7 @@ flowchart LR
 [^strandflow-entrypoint]: Strand Flow implementation: [`StrandFlow.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/paths/detail/StrandFlow.h#L82)
 [^tostrands]: toStrands implementation: [`PaySteps.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/PaySteps.cpp#L574)
 [^quality-rate]: Quality stored as normalize(input / output) via `getRate`: [`STAmount.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/STAmount.cpp#L460-L481), [`Quality.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Quality.cpp#L17-L18)
-[^quality-comparison]: Inverted comparison operators (lower stored value = higher quality): [`Quality.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/protocol/Quality.h#L216-L230)
+[^quality-comparison]: Inverted comparison operators (lower stored value = higher quality): [`Quality.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/Quality.h#L239-L254)
 [^quality-increment]: Increment decreases stored value (higher quality), decrement increases it (lower quality): [`Quality.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Quality.cpp#L21-L53)
 [^quality-no-improvement]: Quality anti-improvement check in `qualitiesSrcRedeems`: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L738-L749)
 [^composed-quality]: `composedQuality` multiplies step rates: [`Quality.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Quality.cpp#L114-L131)
@@ -328,10 +328,10 @@ Each step type calculates quality differently:
 See the [steps documentation](steps.md) for detailed quality calculations.
 
 [^xrp-quality]: XRPEndpointStep always returns `Quality{STAmount::kURateOne}`: [`XRPEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/XRPEndpointStep.cpp#L253-L257)
-[^xrp-quality-oc]: `qualityUpperBound` is in the base template `XRPEndpointStep<TDerived>` with no override in the offer crossing variant `XRPEndpointOfferCrossingStep`: [`XRPEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/XRPEndpointStep.cpp#L190-L241)
+[^xrp-quality-oc]: `qualityUpperBound` is in the base template `XRPEndpointStep<TDerived>` with no override in the offer crossing variant `XRPEndpointOfferCrossingStep`: [`XRPEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/XRPEndpointStep.cpp#L189-L240)
 [^mpt-quality-issues]: MPTEndpointStep applies transfer rate in `qualitiesSrcIssues` only when `redeems(prevStepDebtDirection)`: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L750-L768)
 [^mpt-oc-prev-issues]: MPTEndpointOfferCrossingStep asserts previous step always issues: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L299-L310)
-[^direct-quality-payment]: DirectIPaymentStep reads QualityIn/QualityOut from trust line fields: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L341-L380)
+[^direct-quality-payment]: DirectIPaymentStep reads QualityIn/QualityOut from trust line fields: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/DirectStep.cpp#L341-L380)
 [^direct-quality-issues]: DirectStepI applies transfer rate in `qualitiesSrcIssues` only when `redeems(prevStepDebtDirection)`: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L752-L771)
 [^direct-quality-oc]: DirectIOfferCrossingStep ignores trust line quality fields, always returns `QUALITY_ONE`: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L382-L388)
 [^direct-oc-prev-issues]: DirectIOfferCrossingStep asserts previous step always issues: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L296-L307)
@@ -481,7 +481,9 @@ Once domain access is verified and Flow begins execution, it has two key implica
 
 **Order Book Isolation**: BookSteps are constructed with the domain ID, which affects order book directory lookup. The book directory hash includes the domain ID: `hash(BOOK_NAMESPACE, asset_in, asset_out, domainID)`. This ensures that only offers within the specified domain can be discovered and consumed.
 
-Domain payments and offer crossing cannot consume AMM liquidity. The BookStep still builds its AMM liquidity object regardless of domain; what is suppressed is AMM *consumption*, short-circuited in `tryAMM`, which returns early when the book is domain-scoped (`if (book_.domain)`). An AMM offer can still contribute to a strand's quality *estimate* (`qualityUpperBound`/`tip` do not check the domain); only consumption is blocked.
+Domain payments and offer crossing cannot consume AMM liquidity. The BookStep still builds its AMM liquidity object regardless of domain. Consumption is short-circuited in `tryAMM`, which returns early when the book is domain-scoped (`if (book_.domain)`). Under the `fixCleanup3_3_0` amendment, the quality estimate is corrected the same way: `getAMMOffer` returns no offer for a domain book, so `qualityUpperBound` and `tip` no longer include AMM liquidity that crossing cannot consume.[^domain-amm-quality] Without the amendment, an AMM offer can still contribute to a domain strand's quality estimate even though it can never be consumed.
+
+[^domain-amm-quality]: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/BookStep.cpp#L904-L917), [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/BookStep.cpp#L820-L823)
 
 For example:
 
@@ -489,7 +491,7 @@ For example:
 - Flow engine creates BookSteps with domainID
 - BookSteps look up domain-specific order book directories
 - Only domain offers and hybrid offers (in domain book) can be consumed
-- AMM liquidity is not consumed (suppressed in `tryAMM`; it may still factor into quality estimation)
+- AMM liquidity is not consumed (suppressed in `tryAMM`) and is excluded from quality estimation
 
 2. Open Payment or Offer Crossing (domainID not set):
 - Flow engine creates BookSteps without domainID

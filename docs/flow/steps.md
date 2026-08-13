@@ -128,14 +128,14 @@ The context affects step behavior throughout the flow process. Steps receive the
 | MPTEndpoint (payment)        | `MPTEndpointPaymentStep`[^mptendpointpaymentstep]       | `MPTAmount` | `MPTAmount` | `make_MPTEndpointStep`[^make-mptendpointstep]  |
 | MPTEndpoint (offer crossing) | `MPTEndpointOfferCrossingStep`[^mptendpointoffercrossingstep] | `MPTAmount` | `MPTAmount` | `make_MPTEndpointStep`  |
 
-[^directipaymentstep]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L231-L279)
-[^directioffercrossingstep]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L282-L337)
+[^directipaymentstep]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/DirectStep.cpp#L231-L279)
+[^directioffercrossingstep]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/DirectStep.cpp#L282-L337)
 [^bookpaymentstep]: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookStep.cpp#L282-L369)
 [^bookoffercrossingstep]: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookStep.cpp#L373-L557)
 [^xrpendpointpaymentstep]: [`XRPEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/XRPEndpointStep.cpp#L167-L187)
-[^xrpendpointoffercrossingstep]: [`XRPEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/XRPEndpointStep.cpp#L190-L241)
-[^mptendpointpaymentstep]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L242-L281)
-[^mptendpointoffercrossingstep]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L284-L326)
+[^xrpendpointoffercrossingstep]: [`XRPEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/XRPEndpointStep.cpp#L189-L240)
+[^mptendpointpaymentstep]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L242-L281)
+[^mptendpointoffercrossingstep]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L284-L326)
 [^iouamount]: [`IOUAmount.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/protocol/IOUAmount.h#L24-L91)
 [^xrpamount]: [`XRPAmount.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/protocol/XRPAmount.h#L19-L237)
 [^mptamount]: [`MPTAmount.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/protocol/MPTAmount.h#L16-L83)
@@ -487,7 +487,7 @@ def quality(sb, qDir):
     return q
 ```
 
-[^directipaymentstep-quality]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L342-L380)
+[^directipaymentstep-quality]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/DirectStep.cpp#L342-L380)
 
 ### 2.2.2. `maxFlow` Implementation
 
@@ -531,7 +531,7 @@ The `check` method[^directipaymentstep-check] validates payment-specific constra
 [^check-payment-no-auth]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L437)
 [^check-payment-no-ripple]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L445)
 [^check-payment-path-dry]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L458)
-[^directipaymentstep-check]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L418-L463)
+[^directipaymentstep-check]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/DirectStep.cpp#L418-L463)
 
 ## 2.3. DirectIOfferCrossingStep (Offer Crossing-Specific Implementation)
 
@@ -553,7 +553,7 @@ Otherwise, it returns using the same logic as DirectIPaymentStep.
 ### 2.3.3. `check` Implementation
 
 The function[^directioffercrossingstep-check] has no additional failure conditions beyond the [base class checks](#215-check-implementation). Offer crossing does not require a pre-existing trust line for `takerPays`, but placing the offer would fail if `takerGets` trust line did not exist for the holder.
-[^directioffercrossingstep-check]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/DirectStep.cpp#L466-L472)
+[^directioffercrossingstep-check]: [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/DirectStep.cpp#L466-L472)
 
 # 3. XRPEndpointStep
 
@@ -856,7 +856,7 @@ def qualitiesSrcIssues(prevDebtDir):
 
 **Payment-specific (`MPTEndpointPaymentStep`):**[^mptendpointstep-check-payment]
 
-[^mptendpointstep-check-payment]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L331-L393)
+[^mptendpointstep-check-payment]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L331-L392)
 [^mptendpointstep-check-payment-requireauth]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L340-L350)
 [^mptendpointstep-check-payment-frozen]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L361-L366)
 [^mptendpointstep-check-payment-dex]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L374-L376)
@@ -878,7 +878,7 @@ def qualitiesSrcIssues(prevDebtDir):
 
 **Offer crossing-specific (`MPTEndpointOfferCrossingStep`):**[^mptendpointstep-check-offer]
 
-[^mptendpointstep-check-offer]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L396-L402)
+[^mptendpointstep-check-offer]: [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L395-L401)
 
 - No additional MPT checks: offer crossing doesn't require a pre-existing MPToken, so it relies on the standard `MPTEndpointStep` checks (above) and returns `tesSUCCESS`.
 
@@ -980,14 +980,14 @@ The order book traversal in `forEachOffer` is implemented through `FlowOfferStre
 
 [^flowofferstream-class]: [`OfferStream.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/paths/OfferStream.h#L129-L149)
 [^tofferstreambase-class]: [`OfferStream.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/paths/OfferStream.h#L15-L109)
-[^offerstream-implementation]: `TOfferStreamBase` implementation with `BookTip` delegation: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/OfferStream.cpp#L205-L232)
+[^offerstream-implementation]: `TOfferStreamBase` implementation with `BookTip` delegation: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/OfferStream.cpp#L205-L232)
 
 `FlowOfferStream` adds the `permToRemove` collection, which tracks offers that should be permanently removed even if the strand is not applied. This is used by `forEachOffer` to track self-crossed offers and other invalid offers that need removal regardless of transaction outcome.
 
-During iteration, `TOfferStreamBase::step()` determines which offers to remove from the order book.[^offerstream-step] It marks offers for permanent removal when the ledger entry is missing, the offer has expired, either amount is zero, the asset is deep frozen, the offer owner's account is no longer in the offer's domain (for domain-restricted offers), or the owner has zero balance. For unfunded offers and tiny offers with reduced quality under `fixReducedOffersV1`, it distinguishes between offers that were already in that state versus offers that became that way during the current transaction by comparing balances in the current view against the pristine `cancelView`.
+During iteration, `TOfferStreamBase::step()` determines which offers to remove from the order book.[^offerstream-step] It marks offers for permanent removal when the ledger entry is missing, the offer has expired, either amount is zero, the asset is deep frozen, the offer owner's account is no longer in the offer's domain (for offers carrying a `DomainID`), or the owner has zero balance. Under the `fixCleanup3_3_0` amendment, the domain membership check runs only when the book being walked is a domain book. This keeps a hybrid offer's open-book entry consumable when its owner loses domain access, for example through credential expiry. Without the amendment the check runs during any book walk, so losing domain access also removes a hybrid offer from open-book processing. For unfunded offers and tiny offers with reduced quality under `fixReducedOffersV1`, it distinguishes between offers that were already in that state versus offers that became that way during the current transaction by comparing balances in the current view against the pristine `cancelView`.
 Only offers that were already unfunded or tiny are permanently removed from the ledger; offers that became unfunded or tiny during execution are simply skipped for this transaction but remain in the order book.
 
-[^offerstream-step]: Offer removal logic in `TOfferStreamBase::step()`: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/OfferStream.cpp#L214-L327)
+[^offerstream-step]: Offer removal logic in `TOfferStreamBase::step()`: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/OfferStream.cpp#L214-L333)
 
 For each valid offer that passes these checks, `TOfferStreamBase` verifies whether the offer owner has sufficient balance to cover their takerGets obligation.[^offerstream-funds-helper]
 For IOU issuers, this returns the full requested amount directly since they can issue unlimited amounts.
@@ -1008,7 +1008,7 @@ BookStep handles three asset types, each with different authorization requiremen
 - **Tokens (IOUs)**: Checked via `requireAuth`, which verifies the offer owner either has a trust line to the token issuer, or the issuer doesn't require authorization (`lsfRequireAuth` flag). If the issuer requires auth and the owner lacks the appropriate auth flag on their trust line, the offer is marked for removal.
 - **MPTs**: Require `requireAuth` (which checks the [`lsfMPTAuthorized`](../mpts/README.md#2221-flags) flag on the holder's MPToken) and `checkMPTDEX`, the MPT DEX permission check (it runs [`canTrade`](../mpts/README.md#361-cantrade) on both book assets and, where the owner is not the issuer, [`canTransfer`](../mpts/README.md#362-cantransfer) for the [`lsfMPTCanTransfer`](../mpts/README.md#2121-flags) flag). When crossing offers where the owner will receive an MPT, if the owner doesn't have an MPToken entry, BookStep automatically creates it via `checkCreateMPT`.
 
-[^bookstep-auth]: Asset authorization checks and MPToken creation in BookStep: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookStep.cpp#L729-L760)
+[^bookstep-auth]: Asset authorization checks and MPToken creation in BookStep: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/BookStep.cpp#L730-L761)
 
 **Pseudocode notes:**
 
@@ -1169,7 +1169,7 @@ def fwdImp(sb, in):
 
 ## 5.3. `forEachOffer`
 
-[^bookstep-foreachoffer]: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookStep.cpp#L686-L853)
+[^bookstep-foreachoffer]: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/BookStep.cpp#L687-L854)
 
 `BookStep::forEachOffer`[^bookstep-foreachoffer] iterates through available liquidity sources (order book offers and AMM offers) in quality order, calling a provided callback for each valid offer until the payment requirements are satisfied.
 
@@ -1198,7 +1198,7 @@ If self-cross removal occurs before any non-self offer has been attempted, the e
 
 [^bookstep-self-cross]: Self-cross detection and permanent removal in `BookOfferCrossingStep::limitSelfCrossQuality`: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookStep.cpp#L399-L454)
 
-[^booktip-step]: `TOfferStreamBase` stores a `BookTip` and delegates advancement to it: [`OfferStream.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/paths/OfferStream.h#L49-L59), [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/OfferStream.cpp#L190-L206). `BookTip::step()` deletes the current offer before finding the next one: [`BookTip.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookTip.cpp#L20-L67)
+[^booktip-step]: `TOfferStreamBase` stores a `BookTip` and delegates advancement to it: [`OfferStream.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/paths/OfferStream.h#L49-L59), [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/OfferStream.cpp#L190-L206). `BookTip::step()` deletes the current offer before finding the next one: [`BookTip.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/BookTip.cpp#L18-L65)
 
 [^booktip-permanent-removal]: `OfferCreate` deletes each offer reported in `removableOffers` from both sandboxes: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L459-L465)
 
@@ -1542,17 +1542,17 @@ def qualityUpperBound(prevStepDir):
 
 ### 5.5.2. `tipOfferQuality` Helper Function
 
-The `tipOfferQuality` method returns the best quality available at the tip of the order book along with its source type (AMM or CLOB). The method calls the `tip()` helper function, which compares both CLOB and AMM offer qualities and returns whichever provides a better exchange rate.
+The `tipOfferQuality` method returns the best quality available at the tip of the order book along with its source type (AMM or CLOB). The method calls the `tip()` helper function, which compares both CLOB and AMM offer qualities and returns whichever provides a better exchange rate. Under the `fixCleanup3_3_0` amendment, `getAMMOffer` returns no AMM offer for a domain book, so `tip()` reports the CLOB quality alone. Without the amendment, AMM quality can win the comparison even for a domain book, where crossing can never consume it (see [section 3.3 of the flow documentation](README.md#33-domain-payments)).
 
 For CLOB offers, the quality is retrieved using the BookTip iterator class[^booktip-class]. BookTip traverses offers in an order book from the highest quality to lowest quality by navigating the directory structure where qualities are encoded in the 8 rightmost bytes of directory index keys. The BookTip constructor[^booktip-constructor] takes a `Book` parameter, which contains the asset pair (in/out currencies and issuers) and an optional `domain` field. When a domain is specified, BookTip looks up the domain-specific order book directory[^booktip-domain] computed as `hash(BOOK_NAMESPACE, asset_in, asset_out, domainID)`, ensuring only domain offers are traversed. The `step()` method[^booktip-step] searches the directory for the first offer page, extracts the quality from the index[^booktip-extract-quality], and retrieves the corresponding offer ledger entry. The `quality()` method[^booktip-quality-method] then returns this extracted quality value.
 
-[^booktip-class]: [`BookTip.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/paths/BookTip.h#L15-L61)
+[^booktip-class]: [`BookTip.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/tx/paths/BookTip.h#L19-L68)
 
 [^booktip-constructor]: [`BookTip.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookTip.cpp#L15-L18)
 
 [^booktip-domain]: [`Indexes.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Indexes.cpp#L107-L109)
 
-[^booktip-step]: [`BookTip.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookTip.cpp#L20-L67)
+[^booktip-step]: [`BookTip.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/BookTip.cpp#L18-L65)
 
 [^booktip-extract-quality]: [`BookTip.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookTip.cpp#L49)
 
