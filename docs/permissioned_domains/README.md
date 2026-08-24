@@ -28,7 +28,7 @@
 
 PermissionedDomains enable credential-based access control for decentralized exchange activity on the XRP Ledger. A domain owner creates a PermissionedDomain specifying which credentials are required, and only accounts holding those credentials can place offers within that domain. This creates segregated order books where trading activity is restricted to authorized participants. Domain restrictions also apply to cross-currency payments that carry a `DomainID`, both the sender and receiver must be in the domain (see [§4.1 Domain Membership](#41-domain-membership)).
 
-Domain offers support all asset types available on the XRP Ledger: XRP, tokens (issued currencies), and MPTs (Multi-Purpose Tokens, which require the `MPTokensV2` amendment). Any trading pair can be restricted to a permissioned domain. Note that domain offers cross only against the permissioned limit order book; automated market maker (AMM) pools are not consulted for domain crossing.[^amm-no-domain]
+Domain offers support all asset types available on the XRP Ledger: XRP, tokens (issued currencies), and MPTs (Multi-Purpose Tokens, which require the `MPTokensV2` amendment). Any trading pair can be restricted to a permissioned domain. Note that domain offers cross only against the permissioned limit order book; automated market maker (AMM) pools are not consulted for domain crossing.[^amm-no-domain] Under the `fixCleanup3_3_0` amendment, AMM liquidity is also excluded from a domain book's quality estimate, so path ranking matches what domain crossing can deliver.[^amm-no-domain-estimate]
 
 For example, a securities exchange creates a PermissionedDomain requiring "accredited_investor" credentials from a regulatory authority. When Alice wants to trade:
 1. Domain Setup: ExchangeAccountID submits PermissionedDomainSet with: `AcceptedCredentials=[{Issuer: RegulatorAccountID, CredentialType: "accredited_investor"}]`
@@ -40,6 +40,7 @@ For example, a securities exchange creates a PermissionedDomain requiring "accre
 The domain owner always has access to their own domain. All other participants must hold valid credentials. Credentials can be revoked (via expiration or deletion), automatically removing access without the domain owner's involvement.
 
 [^amm-no-domain]: AMM pools are not consulted when a book has a domain: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookStep.cpp#L820-L822)
+[^amm-no-domain-estimate]: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/BookStep.cpp#L904-L917)
 
 ## 1.1. Terminology and Concepts
 
@@ -121,6 +122,10 @@ When present on an Offer ledger entry, this field indicates the offer exists in 
 Under the `fixCleanup3_2_0` amendment, when a hybrid offer partially crosses on placement, the open-book `BookDirectory` listed here is keyed by the offer's original placement rate, so it shares the same quality (`ExchangeRate`) as the primary domain `BookDirectory`. Before the amendment the open-book directory was keyed from the post-crossing amounts and could differ slightly due to rounding.[^pd-hybrid-rate]
 
 [^pd-hybrid-rate]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L944-L953)
+
+Under the `fixCleanup3_3_0` amendment, a resting hybrid offer's domain membership is re-validated only while the domain book is being walked. When the owner loses domain access, for example through credential expiry, the open-book entry stays consumable until a domain-book walk encounters the offer and removes it entirely, from both books. Without the amendment, the membership check ran during any book walk, so open-book processing also removed the offer.[^pd-hybrid-eviction]
+
+[^pd-hybrid-eviction]: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/OfferStream.cpp#L253-L267), [`OfferHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/OfferHelpers.cpp#L38-L60)
 
 # 3. Transactions
 
@@ -247,7 +252,7 @@ Function: accountInDomain(view, account, domainID)
 
 **Expiration Check**: Credential expiration is compared against the ledger's `parentCloseTime`. Expired credentials are treated as if they don't exist for domain access purposes. During transaction apply, an expired credential encountered while verifying domain membership is also deleted to reclaim its reserve; under the `fixCleanup3_1_3` amendment, if that deletion fails the transaction halts and returns the propagated error (e.g. `tecINTERNAL`) instead of continuing the membership check.[^pd-expiry-delete]
 
-[^pd-expiry-delete]: [`removeExpired`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L62-L65), [`verifyValidDomain`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L332-L334)
+[^pd-expiry-delete]: [`removeExpired`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L61-L64), [`verifyValidDomain`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L332-L334)
 
 **Performance**: Verification iterates through the domain's AcceptedCredentials array (max 10 entries), performing one ledger lookup per credential until a valid match is found.
 

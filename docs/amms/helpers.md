@@ -48,6 +48,10 @@ AMM helpers use **token** as a subject in many function names. This refers to an
 
 Functions for handling precision and rounding with the [fixAMMv1_3](https://xrpl.org/resources/known-amendments#fixammv1_3) amendment. These functions ensure that floating-point calculations do not introduce precision errors that could be exploited or cause inconsistencies.
 
+The `checkAMMPrecisionLoss` helper (requires `fixCleanup3_3_0` together with `fixAMMv1_3`) verifies the pool product invariant, comparing `sqrt(asset1 * asset2)` against the new LP token balance. A failed check returns `tecPRECISION_LOSS`.[^check-precision-loss]
+
+[^check-precision-loss]: [`AMMHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/AMMHelpers.cpp#L436-L471)
+
 ## 2.1. getRoundedLPTokens
 
 Calculate LP tokens with proper rounding and precision adjustment.

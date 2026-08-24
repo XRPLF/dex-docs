@@ -39,7 +39,9 @@ The `applyGuts` function[^apply-guts] is the main entry point for processing AMM
 
 It retrieves the AMM ledger entry and current pool balances, then determines which trading fee applies to the depositor (regular or discounted for [auction slot holders](#3-gettradingfee)). Based on the transaction flags and provided fields, it dispatches to one of deposit mode handlers: three [multi-asset modes](#4-multi-asset-deposit-modes) that maintain proportional deposits or reinitialize empty pools, and three [single-asset modes](#5-single-asset-deposit-modes) that perform single-sided deposits. Each mode handler calculates the deposit amounts and LP tokens to issue, then calls the [common deposit function](#6-common-deposit-function) to execute the actual asset transfers and update the pool state.
 
-[^apply-guts]: `AMMDeposit::applyGuts`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L383-L484) 
+Under the `fixCleanup3_3_0` amendment, `preclaim` runs the freeze checks for both pool assets whether or not they are deposited. See the [failure conditions](README.md#322-failure-conditions) for the resulting behavior change.
+
+[^apply-guts]: `AMMDeposit::applyGuts`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L412-L526) 
 
 ## 2.1. applyGuts Pseudo-Code
 
@@ -188,7 +190,7 @@ The `getTradingFee` function[^get-trading-fee] is called by [`applyGuts`](#2-app
 
 It checks if the depositor holds the [auction slot](README.md#121-auction-slot) or is listed in the slot's authorized accounts and if the auction slot has not expired. If so, it returns the discounted fee (1/10th of the regular fee). Otherwise, it returns the AMM's standard trading fee.
 
-[^get-trading-fee]: `getTradingFee`: [`AMMHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/AMMHelpers.cpp#L566-L593)  
+[^get-trading-fee]: `getTradingFee`: [`AMMHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/AMMHelpers.cpp#L602-L627)  
 
 ## 3.1. getTradingFee Pseudo-Code
 
@@ -706,7 +708,7 @@ def singleDepositEPrice(
 
 The `deposit()` function[^deposit] is called by all deposit modes to perform the actual asset transfers. This function validates minimum constraints for slippage protection, checks the depositor has sufficient funds for the deposit, transfers the assets from the depositor to the AMM account, and issues LP tokens to the depositor (creating a trust line if needed).
 
-[^deposit]: `AMMDeposit::deposit`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L501-L620)
+[^deposit]: `AMMDeposit::deposit`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L543-L670)
 
 ## 6.1. deposit Pseudo-Code
 

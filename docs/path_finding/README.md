@@ -397,7 +397,7 @@ The path finding algorithm searches through these types based on the requested s
 
 For the complete list of path types for each payment type, see `Pathfinder::initPathTable()`[^init-path-table].
 
-[^init-path-table]: Path table initialization: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1388-L1453)
+[^init-path-table]: Path table initialization: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1365-L1430)
 
 **Configuration**
 
@@ -859,7 +859,7 @@ def addLinks(currentPaths, incompletePaths, addFlags, continueCallback):
 
 `addLink`[^add-link] is where the actual path expansion happens - it's the function that queries the ledger and creates new path branches.
 
-[^add-link]: Core path expansion function: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L995-L1324)
+[^add-link]: Core path expansion function: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L972-L1301)
 
 **Parameters:**
 
@@ -929,21 +929,21 @@ Each asset connection undergoes these checks in order:
 [^get-ripple-lines-direction]: LineDirection::incoming excludes trust lines where the account has NoRipple set: [`TrustLine.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/TrustLine.cpp#L61)
 [^noripple-candidate-check]: Per-candidate NoRipple check in addLink: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1101)
 [^asset-cache-superset]: AssetCache returns the outgoing superset when incoming is requested but outgoing is already cached: [`AssetCache.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/AssetCache.cpp#L78-L87)
-[^getpathsout]: getPathsOut computes the paths out score for an account: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L749-L854)
+[^getpathsout]: getPathsOut computes the paths out score for an account: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L748-L835)
 [^getpathsout-auth]: getPathsOut checks lsfRequireAuth on the candidate account: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L771-L775)
 [^getpathsout-booksize]: Score starts with order book size: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L786)
-[^getpathsout-destination-bonus]: Destination bonus of +10000: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L802-L806)
+[^getpathsout-destination-bonus]: Destination bonus of +10000: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L800-L804)
 [^getpathsout-frozen]: Global freeze check in getPathsOut: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L776-L784)
-[^getpathsout-iou-loop]: IOU trust line scoring loop: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L789-L820)
-[^getpathsout-noripple]: getPathsOut skips trust lines where the peer has NoRipple set: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L808-L810)
-[^getpathsout-freeze]: getPathsOut skips trust lines where the peer has frozen the line: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L812-L814)
-[^getpathsout-mpt-loop]: MPT scoring loop: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L823-L849)
-[^getpathsout-mpt-match]: MPT ID match check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L828-L829)
-[^getpathsout-mpt-balance]: MPT zero balance or maxed out check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L831-L832)
-[^getpathsout-mpt-auth]: MPT authorization check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L834-L835)
-[^getpathsout-mpt-destination]: MPT destination bonus of +10000: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L837-L840)
-[^getpathsout-mpt-frozen]: MPT frozen check (redundant with outer freeze check): [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L841)
-[^getpathsout-mpt-count]: MPT count increment: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L845-L846)
+[^getpathsout-iou-loop]: IOU trust line scoring loop: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L788-L830)
+[^getpathsout-noripple]: getPathsOut skips trust lines where the peer has NoRipple set: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L805-L806)
+[^getpathsout-freeze]: getPathsOut skips trust lines where the peer has frozen the line: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L807-L808)
+[^getpathsout-mpt-loop]: MPT scoring loop: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L813-L831)
+[^getpathsout-mpt-match]: MPT ID match check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820)
+[^getpathsout-mpt-balance]: MPT zero balance or maxed out check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820)
+[^getpathsout-mpt-auth]: MPT authorization check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820)
+[^getpathsout-mpt-destination]: MPT destination bonus of +10000: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L821-L825)
+[^getpathsout-mpt-frozen]: MPT individual frozen check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L826-L827)
+[^getpathsout-mpt-count]: MPT count increment: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L827-L828)
 [^compare-account-candidate]: compareAccountCandidate sorts by priority descending, then account ID descending: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L108-L124)
 [^dest-complete-path]: Destination account with matching asset completes the path: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1121-L1130)
 [^dest-high-priority]: Destination account with non-matching asset receives high priority directly: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1132-L1136)

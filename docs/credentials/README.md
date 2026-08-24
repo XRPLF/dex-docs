@@ -133,6 +133,7 @@ This ensures each credential is uniquely identified by its (subject, issuer, typ
 | `URI`               | Blob      | Optional | Reference URI for credential metadata (max 256 bytes)     |
 | `IssuerNode`        | UInt64    | Yes      | Index of the issuer's owner directory page                |
 | `SubjectNode`       | UInt64    | Optional | Index of the subject's owner directory page (only present when issuer != subject)[^2] |
+| `Sponsor`           | AccountID | Optional | Account currently covering this credential's owner reserve. Present only while the reserve is sponsored (`Sponsor` amendment)[^6] |
 | `Flags`             | UInt32    | Yes      | Credential flags (see below); always present, 0 until `lsfAccepted` is set |
 | `PreviousTxnID`     | Hash256   | Yes      | Hash of the previous transaction that modified this entry |
 | `PreviousTxnLgrSeq` | UInt32    | Yes      | Ledger sequence of the previous transaction               |
@@ -149,8 +150,9 @@ The `Flags` field can contain the following values:
 - When `lsfAccepted` is not set: The credential exists but has not been accepted by the subject. It cannot be used for authorization. It appears in both the issuer's and subject's owner directories, but only the issuer's owner count is incremented (the issuer pays the reserve).[^3]
 - When `lsfAccepted` is set: The credential has been accepted and is active. It appears in both the issuer's and subject's owner directories and can be used for authorization.
 
-[^3]: Credential added to both directories during creation: [`Credentials.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/credentials/CredentialCreate.cpp#L147-L174)
+[^3]: Credential added to both directories during creation: [`CredentialCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/credentials/CredentialCreate.cpp#L154-L183)
 [^4]: Deletion authorization: [`Credentials.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/credentials/CredentialDelete.cpp#L89-L94)
+[^6]: [`LedgerFormats.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/protocol/LedgerFormats.cpp#L13-L21), [`SponsorHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/SponsorHelpers.cpp#L267-L285)
 - Self-issued credentials (issuer == subject) automatically have `lsfAccepted` set during creation.
 
 ### 2.1.3. Pseudo-accounts
@@ -185,11 +187,15 @@ Credentials follow the standard XRP Ledger reserve requirements:
 
 The owner reserve is calculated as `incrementalReserve` (the per-object owner reserve increment set by the network). When a credential is deleted, the reserve is freed and the owner count decreases.
 
+Under the `Sponsor` amendment (XLS-68), a credential's reserve can be covered by a reserve sponsor recorded in the credential's `Sponsor` field. The sponsor then bears the reserve in place of the issuer or subject. Sponsorship does not carry over automatically when the subject accepts. Deletion releases the reserve against the recorded sponsor. The sponsorship mechanism is described in the [transactions documentation](../transactions/README.md).[^7]
+
+[^7]: [`SponsorHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/SponsorHelpers.cpp#L28-L61), [`CredentialCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/credentials/CredentialCreate.cpp#L141-L170), [`CredentialAccept.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/credentials/CredentialAccept.cpp#L96-L134), [`CredentialHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L97-L101)
+
 # 3. Transactions
 
 ## 3.1. CredentialCreate Transaction
 
-The `CredentialCreate` transaction creates a new credential from an issuer to a subject.
+The `CredentialCreate` transaction creates a new credential from an issuer to a subject. Under the `fixCleanup3_3_0` amendment, the subject cannot be a pseudo-account (an AMM, Vault, or LoanBroker account).
 
 | Field Name        |     Required?      | JSON Type | Internal Type | Description                                                 |
 |-------------------|:------------------:|:---------:|:-------------:|:------------------------------------------------------------|
@@ -215,12 +221,15 @@ The `CredentialCreate` transaction creates a new credential from an issuer to a 
 
 - `tecNO_TARGET`: Subject account does not exist
 - `tecDUPLICATE`: A credential with this (subject, issuer, credentialType) triple already exists
+- `tecPSEUDO_ACCOUNT`: `Subject` is a pseudo-account, such as an AMM, Vault, or LoanBroker account (requires the `fixCleanup3_3_0` amendment)[^8]
+
+[^8]: [`CredentialCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/credentials/CredentialCreate.cpp#L101-L105)
 
 **Validation during doApply**
 
 - `tefINTERNAL`: Failed to create credential ledger entry or issuer account not found
 - `tecEXPIRED`: `Expiration` field is set to a time in the past (before ledger close time)
-- `tecINSUFFICIENT_RESERVE`: Issuer has insufficient XRP to pay the owner reserve
+- `tecINSUFFICIENT_RESERVE`: Issuer has insufficient XRP to pay the owner reserve. For a sponsored reserve, the sponsor has insufficient XRP or the pre-funded sponsorship has no remaining owner-count allowance
 - `tecDIR_FULL`: Owner directory is full and cannot add new entry
 
 ### 3.1.2. State Changes
@@ -233,12 +242,15 @@ The `CredentialCreate` transaction creates a new credential from an issuer to a 
     - `URI`: Set to specified URI (if provided)
     - `SubjectNode`: Index in subject's owner directory
     - `IssuerNode`: Index in issuer's owner directory
+    - `Sponsor`: Set to the reserve sponsor (only when the transaction's reserve is sponsored)
     - `Flags`:
         - If issuer == subject: `lsfAccepted` is set immediately
         - If issuer != subject: No flags set (credential awaits acceptance)
 
 - Issuer's `AccountRoot` is **modified**:
     - `OwnerCount`: Incremented by 1
+
+- For a reserve-sponsored transaction, the sponsorship accounting fields on the issuer, the sponsor, and any pre-funded `Sponsorship` entry are also updated, as described in the [transactions documentation](../transactions/README.md).
 
 - `DirectoryNode` entries are **created/modified**:
     - Credential added to issuer's owner directory (always)
@@ -274,7 +286,7 @@ The `CredentialAccept` transaction allows a subject to accept a credential that 
 **Validation during doApply**
 
 - `tefINTERNAL`: Subject or issuer account not found
-- `tecINSUFFICIENT_RESERVE`: Subject has insufficient XRP to pay the owner reserve
+- `tecINSUFFICIENT_RESERVE`: Subject has insufficient XRP to pay the owner reserve. For a sponsored reserve, the sponsor has insufficient XRP or the pre-funded sponsorship has no remaining owner-count allowance
 - `tecEXPIRED`: Credential has expired (current ledger time > credential's `Expiration`)
 
 ### 3.2.2. State Changes
@@ -283,12 +295,15 @@ The `CredentialAccept` transaction allows a subject to accept a credential that 
 
 - `Credential` object is **modified**:
     - `Flags`: `lsfAccepted` flag is set
+    - `Sponsor`: The pre-acceptance sponsor, if any, is removed. The accept transaction's reserve sponsor, if any, is recorded
 
 - Issuer's `AccountRoot` is **modified**:
     - `OwnerCount`: Decremented by 1
 
 - Subject's `AccountRoot` is **modified**:
     - `OwnerCount`: Incremented by 1
+
+- For sponsored reserves, the issuer-side release is applied against the pre-acceptance sponsor and the subject's new reserve is accounted against the accept transaction's sponsor, as described in the [transactions documentation](../transactions/README.md).
 
 **If credential is expired:**
 
@@ -353,6 +368,8 @@ The `CredentialDelete` transaction removes a credential from the ledger.
 - Subject's `AccountRoot` is **modified** (if credential was accepted):
     - `OwnerCount`: Decremented by 1
 
+- If the credential carries a `Sponsor` field, the reserve release is accounted against that sponsor, as described in the [transactions documentation](../transactions/README.md).
+
 - `DirectoryNode` entries are **updated**:
     - Credential entry removed from issuer's owner directory (always)
     - Credential entry removed from subject's owner directory (if subject != issuer)
@@ -392,7 +409,7 @@ The sender includes the hashes of credentials they hold. During transaction proc
 
 Supplying `CredentialIDs` is itself constrained: if any listed credential is expired, the transaction fails with `tecEXPIRED` before the deposit-authorization checks run, and this applies to any transaction that carries `CredentialIDs` (Payment, EscrowFinish, etc.), even when the destination does not require deposit authorization. The expired credential is also deleted as part of this (recovering its reserve), even though the transaction fails. Under the `fixCleanup3_1_3` amendment, if that deletion itself fails, the transaction halts and returns the deletion's error (e.g. `tecINTERNAL`) instead of `tecEXPIRED`.[^5]
 
-[^5]: [`CredentialHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L62-L65)
+[^5]: [`CredentialHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L61-L64)
 
 **Example Flow**:
 

@@ -167,6 +167,10 @@ When a trust line side transitions from default to non-default state, the `lsfLo
 set and the account's `OwnerCount` is incremented. When all parameters return to default state, the reserve flag is
 cleared and `OwnerCount` is decremented.
 
+Under the `Sponsor` amendment, the reserve for the source account's side of a trust line can be covered by a reserve sponsor. Each side records its own sponsor in the `LowSponsor` or `HighSponsor` field of the `RippleState` entry. Only the transaction's own account's side can be sponsored, never the counterparty's. The reserve waiver for accounts owning fewer than two objects does not apply to a sponsored transaction. When a sponsored side returns to default state, the reserve release is accounted against the recorded sponsor and the field is removed. Trust lines created implicitly during payment execution and offer crossing are never sponsored. The `SponsorshipTransfer` transaction can start, reassign, or end sponsorship of a side that currently holds a reserve. The sponsorship mechanism is described in the [transactions documentation](../transactions/README.md).[^tl-sponsor]
+
+[^tl-sponsor]: [`ledger_entries.macro`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/detail/ledger_entries.macro#L280-L294), [`TrustSet.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/TrustSet.cpp#L319-L331), [`TokenHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/TokenHelpers.cpp#L1480-L1497), [`SponsorshipTransfer.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/sponsor/SponsorshipTransfer.cpp#L238-L295)
+
 # 3. Transactions
 
 ## 3.1. RippleState Transactions
@@ -218,7 +222,7 @@ to [TrustSet Flags](https://xrpl.org/docs/references/protocol/transactions/types
 - `temDST_IS_SRC`: the source account and the destination account (`LimitAmount.issuer`) are the same.
 - `tecNO_DST`: the [AMM](https://xrpl.org/resources/known-amendments#amm) or [SingleAssetVault](https://xrpl.org/resources/known-amendments#singleassetvault) amendment is enabled and the destination (issuer) account does not exist.
 - `tecNO_PERMISSION`: the destination account has the `lsfDisallowIncomingTrustline` flag set:
-    - If the trust line was already created for a destination with `lsfDisallowIncomingTrustline` and amendment [fixDisallowIncomingV1](https://xrpl.org/resources/known-amendments#fixdisallowincomingv1) was enabled, do not fail.
+    - If the trust line already exists, do not fail (the [fixDisallowIncomingV1](https://xrpl.org/resources/known-amendments#fixdisallowincomingv1) amendment that introduced this exemption was retired, so it applies unconditionally).
 - If the destination account is a pseudo-account:
     - `sfAMMID`: destination is an AMM account (has `sfAMMID` field), but the trust line does not already exist between source and AMM.
             - `tecAMM_EMPTY`: AMM has zero LP IOUs - cannot create trust lines to empty AMMs.
@@ -240,8 +244,8 @@ to [TrustSet Flags](https://xrpl.org/docs/references/protocol/transactions/types
 - `tecNO_DST`: destination account does not exist.
 - `tecNO_PERMISSION`: the user is trying to set `tfSetNoRipple` and the source account's balance on the trust line is negative.
 - `tecINSUF_RESERVE_LINE`: user does not have enough balance to cover the reserve and wants to modify an existing trust line, regardless
-  of whether they or the counterparty have created the original trust line.
-- `tecNO_LINE_INSUF_RESERVE`: user does not have enough balance to cover the reserve and wants to create a new trust line. 
+  of whether they or the counterparty have created the original trust line. For a sponsored reserve, the sponsor has insufficient XRP or the pre-funded sponsorship has no remaining owner-count allowance.
+- `tecNO_LINE_INSUF_RESERVE`: user does not have enough balance to cover the reserve and wants to create a new trust line. For a sponsored reserve, the sponsor has insufficient XRP or the pre-funded sponsorship has no remaining owner-count allowance.
 - `tecNO_LINE_REDUNDANT`: trust line does not already exist, amount is `0`, and `QualityIn` and `QualityOut` are either not set, or set to their default value (`1,000,000,000`), and if `tfSetfAuth` flag is not set.
 
 #### 3.1.1.2. State Changes
@@ -274,8 +278,10 @@ to [TrustSet Flags](https://xrpl.org/docs/references/protocol/transactions/types
     - If account's parameters in a trust line change to non-default values such that it requires reserve but did not
       before:
         - Set appropriate `lsfLowReserve` or `lsfHighReserve` flag
+        - If the transaction's reserve is sponsored, record the sponsor in the side's `LowSponsor` or `HighSponsor` field
     - If account no longer requires reserve because its values in a trust line are now default values:
         - Clear appropriate `lsfLowReserve` or `lsfHighReserve` flag
+        - The reserve release is accounted against the sponsor recorded on that side, if any, and the sponsor field is removed
     - Only the NoRipple, freeze, authorization, and reserve flag bits are individually set or cleared (as described above); all other stored flag bits are preserved, and `sfFlags` is rewritten only if it changed.
 
 
@@ -289,7 +295,7 @@ to [TrustSet Flags](https://xrpl.org/docs/references/protocol/transactions/types
       - The source account's NoRipple flag (`lsfLowNoRipple` or `lsfHighNoRipple`) is set if the TrustSet transaction contains `tfSetNoRipple` and not `tfClearNoRipple`[^trustcreate-noripple-src].
       - The destination account's NoRipple flag is set if the destination account does **not** have `lsfDefaultRipple` on their account[^trustcreate-noripple-dst]. `lsfDefaultRipple` is an account-level flag set via AccountSet (`asfDefaultRipple`). When an issuer sets `lsfDefaultRipple`, new trust lines are created without NoRipple on the issuer's side, allowing rippling by default.
 
-[^modify-then-delete]: Default state check and deletion after modification: [`TrustSet.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/token/TrustSet.cpp#L595-L600)
+[^modify-then-delete]: Default state check and deletion after modification: [`TrustSet.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/TrustSet.cpp#L617-L622)
 [^trustcreate-noripple]: NoRipple initialization in trustCreate: [`RippleStateHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/RippleStateHelpers.cpp#L264-L281)
 [^trustcreate-noripple-src]: Source account NoRipple from transaction flags: [`RippleStateHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/RippleStateHelpers.cpp#L264-L267)
 [^trustcreate-noripple-dst]: Destination account NoRipple from lsfDefaultRipple: [`RippleStateHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/RippleStateHelpers.cpp#L277-L281)
