@@ -286,11 +286,11 @@ A **domain offer** is an offer created with the `DomainID` field set. Domain off
 
 A **hybrid offer** is an offer created with both the `DomainID` field set AND the `tfHybrid` flag enabled. Hybrid offers exist simultaneously in both the domain order book and the open order book, with a primary entry in the domain book and a secondary entry (via the `AdditionalBooks` field) in the open book. When a hybrid offer is created, it only crosses with offers in the domain book, since the `DomainID` is passed to the flow engine which uses that domain's order book. Once the hybrid offer is resting on the books, it can be consumed by both domain payments/offers (via the domain book entry) and open payments/offers (via the open book entry).[^hybrid-books]
 
-Under the `fixCleanup3_3_0` amendment, a resting hybrid offer's domain membership is re-validated only while the domain book is being walked. Losing domain access, for example through credential expiry, removes the offer during domain-book processing but leaves the open-book entry consumable. Without the amendment, the membership check ran during any book walk, so losing domain access also removed the hybrid offer during open-book processing.[^hybrid-eviction]
+Under the `fixCleanup3_3_0` amendment, a resting hybrid offer's domain membership is re-validated only while the domain book is being walked. When the owner loses domain access, for example through credential expiry, the open-book entry stays consumable until a domain-book walk encounters the offer and removes it entirely, from both books. Without the amendment, the membership check ran during any book walk, so open-book processing also removed the offer.[^hybrid-eviction]
 
 [^domain-book-segregation]: [`Indexes.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Indexes.cpp#L102-L110)
 [^hybrid-books]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L561-L603)
-[^hybrid-eviction]: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/OfferStream.cpp#L253-L267)
+[^hybrid-eviction]: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/OfferStream.cpp#L253-L267), [`OfferHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/OfferHelpers.cpp#L38-L60)
 
 # 2. Ledger Entries
 

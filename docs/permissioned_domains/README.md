@@ -123,9 +123,9 @@ Under the `fixCleanup3_2_0` amendment, when a hybrid offer partially crosses on 
 
 [^pd-hybrid-rate]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L944-L953)
 
-Under the `fixCleanup3_3_0` amendment, a resting hybrid offer's domain membership is re-validated only while the domain book is being walked. Losing domain access, for example through credential expiry, removes the offer during domain-book processing but leaves the open-book entry consumable. Without the amendment, the membership check ran during any book walk, so losing domain access also removed the hybrid offer during open-book processing.[^pd-hybrid-eviction]
+Under the `fixCleanup3_3_0` amendment, a resting hybrid offer's domain membership is re-validated only while the domain book is being walked. When the owner loses domain access, for example through credential expiry, the open-book entry stays consumable until a domain-book walk encounters the offer and removes it entirely, from both books. Without the amendment, the membership check ran during any book walk, so open-book processing also removed the offer.[^pd-hybrid-eviction]
 
-[^pd-hybrid-eviction]: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/OfferStream.cpp#L253-L267)
+[^pd-hybrid-eviction]: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/OfferStream.cpp#L253-L267), [`OfferHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/OfferHelpers.cpp#L38-L60)
 
 # 3. Transactions
 

@@ -942,7 +942,7 @@ Each asset connection undergoes these checks in order:
 [^getpathsout-mpt-balance]: MPT zero balance or maxed out check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820)
 [^getpathsout-mpt-auth]: MPT authorization check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820)
 [^getpathsout-mpt-destination]: MPT destination bonus of +10000: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L821-L825)
-[^getpathsout-mpt-frozen]: MPT frozen check (redundant with outer freeze check): [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L826-L827)
+[^getpathsout-mpt-frozen]: MPT individual frozen check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L826-L827)
 [^getpathsout-mpt-count]: MPT count increment: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L827-L828)
 [^compare-account-candidate]: compareAccountCandidate sorts by priority descending, then account ID descending: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L108-L124)
 [^dest-complete-path]: Destination account with matching asset completes the path: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1121-L1130)

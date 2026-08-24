@@ -39,7 +39,7 @@ The `applyGuts` function[^apply-guts] is the main entry point for processing AMM
 
 It retrieves the AMM ledger entry and current pool balances, then determines which trading fee applies to the depositor (regular or discounted for [auction slot holders](#3-gettradingfee)). Based on the transaction flags and provided fields, it dispatches to one of deposit mode handlers: three [multi-asset modes](#4-multi-asset-deposit-modes) that maintain proportional deposits or reinitialize empty pools, and three [single-asset modes](#5-single-asset-deposit-modes) that perform single-sided deposits. Each mode handler calculates the deposit amounts and LP tokens to issue, then calls the [common deposit function](#6-common-deposit-function) to execute the actual asset transfers and update the pool state.
 
-Under the `fixCleanup3_3_0` amendment, `applyGuts` runs the freeze checks for both pool assets whether or not they are deposited. See the [failure conditions](README.md#322-failure-conditions) for the resulting behavior change.
+Under the `fixCleanup3_3_0` amendment, `preclaim` runs the freeze checks for both pool assets whether or not they are deposited. See the [failure conditions](README.md#322-failure-conditions) for the resulting behavior change.
 
 [^apply-guts]: `AMMDeposit::applyGuts`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L412-L526) 
 

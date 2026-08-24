@@ -594,7 +594,7 @@ def singleWithdrawEPrice(
 
 The `withdraw()` function[^withdraw] serves as the final common pathway for all withdrawal modes, executing the actual asset transfers after mode-specific handlers determine the withdrawal amounts.
 
-Under `fixCleanup3_3_0` together with `fixAMMv1_3`, the common path also runs the pool product check described in [Precision and Rounding](helpers.md#2-precision-and-rounding). See the [failure conditions](README.md#332-failure-conditions) for the resulting `tecPRECISION_LOSS`.
+Under `fixCleanup3_3_0` together with `fixAMMv1_3`, `applyGuts` runs the pool product check described in [Precision and Rounding](helpers.md#2-precision-and-rounding) after the mode handlers return. See the [failure conditions](README.md#332-failure-conditions) for the resulting `tecPRECISION_LOSS`.
 
 [^withdraw]: AMMWithdraw::withdraw: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L479-L749)
 
