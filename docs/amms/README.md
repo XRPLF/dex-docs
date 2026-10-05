@@ -629,7 +629,7 @@ The two amounts can be in any order - the AMM will automatically order them as `
 
 ### 3.1.2. State Changes[^ammcreate-state-changes]
 
-[^ammcreate-state-changes]: State changes (doApply): [`AMMCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMCreate.cpp#L268-L403)
+[^ammcreate-state-changes]: State changes (doApply): [`AMMCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMCreate.cpp#L266-L401)
 
 - `AccountRoot` object is **created** for AMM pseudo-account:
     - `Account`: Generated pseudo-account ID (from collision-avoidance algorithm)
@@ -769,7 +769,7 @@ The deposit mode is determined by exactly one of these flags (enforced by checki
 
 **Validation during doApply**[^ammdeposit-doapply-validation]
 
-[^ammdeposit-doapply-validation]: Validation during doApply: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L412-L1046)
+[^ammdeposit-doapply-validation]: Validation during doApply: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L412-L1091)
 
 - `tecINTERNAL`: AMM ledger entry does not exist (should not happen if preclaim succeeded)
 - `temBAD_AMOUNT`: Deposit amount after adjustment/calculation is zero or negative. Deposit amounts are adjusted based on the deposit mode (e.g., proportional calculations for tfLPToken, pool ratio adjustments for tfTwoAsset, or LP token precision adjustments).
@@ -780,11 +780,14 @@ The deposit mode is determined by exactly one of these flags (enforced by checki
   - tfTwoAsset mode: neither calculated deposit strategy satisfies both `Amount` and `Amount2` constraints (maximums)
   - tfOneAssetLPToken mode: calculated deposit amount exceeds `Amount` (maximum willing to deposit)
   - tfLimitLPToken mode: calculated deposit amount is invalid or effective price constraint cannot be satisfied with `EPrice` (maximum effective price)
+  - Any mode under `fixCleanup3_4_0`: the solved deposit amount falls outside the representable range. The amendment should make such a pathological input fail cleanly instead of aborting the transaction.[^tflptoken-guard-readme] Without the amendment the conversion throws and the transaction fails with `tefEXCEPTION`
 - `tecAMM_INVALID_TOKENS`: Calculated LP tokens are zero or invalid. This can occur when:
   - LP token adjustments for precision result in zero tokens (with [fixAMMv1_3](https://xrpl.org/resources/known-amendments#fixammv1_3))
   - Deposit amount is too small relative to pool size, resulting in zero LP tokens after rounding
   - Occurs in any deposit mode where LP tokens are calculated (tfLPToken, tfSingleAsset, tfTwoAsset, tfOneAssetLPToken, tfLimitLPToken)
 - Propagate errors from `accountSend()` when transferring assets to AMM account and LP tokens to depositor (see [Common Error Codes from accountSend()](#common-error-codes-from-accountsend))
+
+[^tflptoken-guard-readme]: In 3.4.0, the tfLPToken mode (`equalDepositTokens`) catches these errors itself and returns `tecINTERNAL`, with or without the amendment: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L745-L751)
 
 ### 3.2.3. State Changes
 
@@ -897,7 +900,7 @@ The withdrawal mode is determined by exactly one of these flags (enforced by che
 
 **Validation during doApply**[^ammwithdraw-doapply-validation]
 
-[^ammwithdraw-doapply-validation]: Validation during doApply: [`AMMWithdraw.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L336-L462)
+[^ammwithdraw-doapply-validation]: Validation during doApply: [`AMMWithdraw.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L337-L486)
 
 - With [fixAMMv1_1](https://xrpl.org/resources/known-amendments#fixammv1_1): `tecAMM_INVALID_TOKENS`: LP token balance adjustment failed. When the withdrawer is the only remaining LP, if their LP token balance differs from the AMM's `LPTokenBalance` by more than 0.1%, the withdrawal fails. If the difference is within 0.1%, the AMM's `LPTokenBalance` is adjusted to match the account's balance to allow full withdrawal despite rounding errors.
 - `tecINTERNAL`: AMM ledger entry does not exist (should not happen if preclaim succeeded)
@@ -909,7 +912,6 @@ The withdrawal mode is determined by exactly one of these flags (enforced by che
 - `tecPRECISION_LOSS`: (with both `fixCleanup3_3_0` and [fixAMMv1_3](https://xrpl.org/resources/known-amendments#fixammv1_3)) the pool product invariant fails after computing the new LP token balance. Without `fixCleanup3_3_0` the same situations are rejected by the `ValidAMM` invariant checker with `tecINVARIANT_FAILED`
 - `tecAMM_INVALID_TOKENS`: Calculated LP tokens or withdrawal amounts are zero or invalid
 - `tecINSUFFICIENT_RESERVE`: (With [fixAMMv1_2](https://xrpl.org/resources/known-amendments#fixammv1_2)) Insufficient XRP reserve to create trust line for withdrawn token that the account doesn't currently hold
-- `tecINCOMPLETE`: Withdrawal empties the pool (all LP tokens redeemed) but AMM account deletion is incomplete due to too many trust lines to delete in a single transaction. The withdrawal succeeds, but the AMM account cleanup must be completed with subsequent AMMDelete transactions. Limited to deleting `kMaxDeletableAmmTrustLines` trust lines per transaction.
 - Propagate errors from `accountSend()` when transferring assets from AMM account to withdrawer (see [Common Error Codes from accountSend()](#common-error-codes-from-accountsend))
 
 ### 3.3.3. State Changes
@@ -922,7 +924,7 @@ The withdrawal mode is determined by exactly one of these flags (enforced by che
     - AMM pseudo-account deleted
     - All trust lines deleted (up to `kMaxDeletableAmmTrustLines` per transaction)
     - Owner directory entries removed
-    - **Note:** If deletion is incomplete due to too many trust lines (`tecINCOMPLETE` returned), the AMM object and pseudo-account remain in the ledger with zero LP tokens. Subsequent `AMMDelete` transactions are needed to complete cleanup.
+    - **Note:** If deletion is incomplete due to too many trust lines, the withdrawal still succeeds with `tesSUCCESS`. The AMM object and pseudo-account remain in the ledger with zero LP tokens. Subsequent `AMMDelete` transactions are needed to complete cleanup.
 
 - AMM account balances are **modified**:
     - Assets transferred from AMM account to withdrawer
@@ -1053,9 +1055,9 @@ See [Bidding documentation](bidding.md) for more details.
 
 **Validation during doApply**[^ammbid-doapply-validation]
 
-[^ammbid-doapply-validation]: Validation during doApply: [`AMMBid.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMBid.cpp#L179-L355)
+[^ammbid-doapply-validation]: Validation during doApply: [`AMMBid.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMBid.cpp#L178-L377)
 
-- `tecAMM_FAILED`: Computed price exceeds `BidMax`
+- `tecAMM_FAILED`: Computed price exceeds `BidMax`. Under `fixCleanup3_4_0`, a zero-fee AMM floors the computed price at the [minimum slot price](bidding.md#41-minimum-slot-price) evaluated with a trading fee of 1, so a `BidMax` below that floor also fails
 - `tecAMM_INVALID_TOKENS`: Pay price exceeds LP token holdings
 - Propagate errors from `accountSend()` when transferring LP tokens between bidder, previous holder, and AMM account (see [Common Error Codes from accountSend()](#common-error-codes-from-accountsend))
 
@@ -1214,9 +1216,9 @@ The issuer identifies a holder who possesses LP tokens for the AMM pool. The tra
 
 When no `Amount` is provided, the transaction burns all of the holder's LP tokens and withdraws both pool assets proportionally using the AMM's equal-withdrawal formula. The issuer's asset (`Asset`) is immediately clawed back - transferred from the pool to the issuer where it is effectively removed from circulation. The second asset (`Asset2`), if not issued by the same issuer or if the `tfClawTwoAssets` flag is not set, is transferred to the holder rather than being clawed back.
 
-When an `Amount` is specified, the transaction calculates the fraction of the pool that corresponds to the requested amount of the issuer's asset. It determines the number of LP tokens required to withdraw that precise amount, accounting for the current pool ratio. If the calculated LP tokens exceed the holder's balance, the transaction instead burns all available LP tokens and withdraws proportionally. Otherwise, it burns only the calculated LP tokens and withdraws both assets proportionally from the pool.
+When an `Amount` is specified, the transaction calculates the fraction of the pool that corresponds to the requested amount of the issuer's asset. It determines the number of LP tokens required to withdraw that precise amount, accounting for the current pool ratio. If the calculated LP tokens equal or exceed the holder's balance, the transaction instead burns all available LP tokens and withdraws proportionally. Before the `fixCleanup3_4_0` amendment equality took the fractional path, whose rounding could leave the holder with a residual position the issuer could not fully claw back. Otherwise, it burns only the calculated LP tokens and withdraws both assets proportionally from the pool.
 
-If the `tfClawTwoAssets` flag is set - which requires the issuer to issue both pool assets - the second asset is also clawed back. Without this flag, the second asset remains with the holder, leaving them with that asset while the issuer's asset is removed from circulation. The withdrawal from the AMM pool ignores freeze and authorization restrictions (`FreezeHandling::IgnoreFreeze` and `AuthHandling::IgnoreAuth`), ensuring clawback operations succeed even when assets are frozen or the holder lacks authorization. The subsequent transfer from holder to issuer uses standard clawback mechanics, which also bypasses authorization and freeze checks.
+If the `tfClawTwoAssets` flag is set - which requires the issuer to issue both pool assets - the second asset is also clawed back. Without this flag, the second asset remains with the holder, leaving them with that asset while the issuer's asset is removed from circulation. The withdrawal from the AMM pool ignores freeze and authorization restrictions (`FreezeHandling::IgnoreFreeze` and `AuthHandling::IgnoreAuth`), ensuring clawback operations succeed even when assets are frozen or the holder lacks authorization. One exception existed before the `fixCleanup3_4_0` amendment: the `TransfersNotFrozen` invariant allowed the clawback across the AMM's trust line only when the freeze was global, so an individual or deep freeze on that line still blocked it (see [failure conditions](#371-failure-conditions)). The subsequent transfer from holder to issuer uses standard clawback mechanics, which also bypasses authorization and freeze checks.
 
 **Fields:**
 
@@ -1282,7 +1284,7 @@ The transaction uses AMM withdrawal logic internally:
 
 **Validation during doApply**[^ammclawback-doapply-validation]
 
-[^ammclawback-doapply-validation]: Validation during doApply: [`AMMClawback.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMClawback.cpp#L168-L300)
+[^ammclawback-doapply-validation]: Validation during doApply: [`AMMClawback.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMClawback.cpp#L168-L301), [`AMMClawback.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMClawback.cpp#L304-L416)
 
 - `tecINTERNAL`:
     - AMM ledger entry does not exist
@@ -1294,9 +1296,12 @@ The transaction uses AMM withdrawal logic internally:
     - Calculated LP token amount during withdrawal is zero or invalid
     - LP token balance adjustment failed during withdrawal
 - `tecPRECISION_LOSS`: (with both `fixCleanup3_3_0` and [fixAMMv1_3](https://xrpl.org/resources/known-amendments#fixammv1_3)) the pool product invariant fails after computing the new LP token balance, the same check as in AMMWithdraw
+- `tecAMM_FAILED`: (with [fixAMMClawbackRounding](https://xrpl.org/resources/known-amendments#fixammclawbackrounding) and `fixCleanup3_4_0`) either rounded withdrawal amount rounds to zero. Guards against a one-sided withdrawal that would distort the pool ratio for the remaining LPs. The issuer retries with a larger amount
+- `tecINVARIANT_FAILED`: (with [DeepFreeze](https://xrpl.org/resources/known-amendments#deepfreeze) and without `fixCleanup3_4_0`) an individual or deep freeze on the AMM's trust line for the clawed asset trips the `TransfersNotFrozen` invariant. `fixCleanup3_4_0` extends the clawback's freeze override to all freeze types, so the issuer's own freeze cannot block its clawback
 - Propagate errors from withdrawal logic (uses `AMMWithdraw::equalWithdrawTokens` or `equalWithdrawMatchingOneAmount`):
     - `tecAMM_FAILED`: Withdrawal constraints not satisfied
     - Other withdrawal-related errors (see [AMMWithdraw Failure Conditions](#332-failure-conditions))
+    - Under `fixCleanup3_4_0` the withdrawal skips the `fixAMMv1_2` reserve check for a trust line or MPToken it must create for the holder, so `tecINSUFFICIENT_RESERVE` is not propagated. Clawback takes priority over the reserve so a holder cannot dodge it by deleting the line and keeping a low balance
 
 ### 3.7.2. State Changes
 

@@ -68,7 +68,7 @@ The domain owner always has access to their own domain. All other participants m
 
 The domain ID is computed at creation using the owner's account and the sequence number consumed by the creating transaction. This can be `Sequence`, or its `TicketSequence` when submitted via a Ticket[^pd-seq].
 
-[^pd-seq]: Domain ID and the stored `Sequence` use the transaction's effective sequence (ticket-aware) under the `fixCleanup3_1_3` amendment: [`PermissionedDomainSet.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/permissioned_domain/PermissionedDomainSet.cpp#L113-L115)
+[^pd-seq]: Domain ID and the stored `Sequence` use the transaction's effective sequence (ticket-aware) under the `fixCleanup3_1_3` amendment: [`PermissionedDomainSet.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/permissioned_domain/PermissionedDomainSet.cpp#L117-L124)
 
 ### 2.1.2. Fields
 
@@ -231,13 +231,13 @@ An account is considered "in domain" if either condition is met:
    - Credential is not expired (checked against parentCloseTime)
 
 Domain membership is checked at:
-- OfferCreate preclaim: Offer creator must be in domain
-- Payment preclaim: Both payer (Account) and payee (Destination) must be in domain (when DomainID field is present)
+- OfferCreate: Offer creator must be in domain
+- Payment: Both payer (Account) and payee (Destination) must be in domain (when DomainID field is present)
 - Offer matching: Offer creator must remain in domain (otherwise offer becomes unfunded)
 
 ## 4.2. Credential Verification
 
-The ledger verifies domain access using the `accountInDomain()` function:
+Offer matching verifies domain access with the `accountInDomain()` function:
 
 ```
 Function: accountInDomain(view, account, domainID)
@@ -250,9 +250,11 @@ Function: accountInDomain(view, account, domainID)
 4. Return FALSE
 ```
 
-**Expiration Check**: Credential expiration is compared against the ledger's `parentCloseTime`. Expired credentials are treated as if they don't exist for domain access purposes. During transaction apply, an expired credential encountered while verifying domain membership is also deleted to reclaim its reserve; under the `fixCleanup3_1_3` amendment, if that deletion fails the transaction halts and returns the propagated error (e.g. `tecINTERNAL`) instead of continuing the membership check.[^pd-expiry-delete]
+**Expiration Check**: Credential expiration is compared against the ledger's `parentCloseTime`. Expired credentials are treated as if they don't exist for domain access purposes.
 
-[^pd-expiry-delete]: [`removeExpired`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L61-L64), [`verifyValidDomain`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L332-L334)
+**Expired credential cleanup**: when an OfferCreate or Payment checks domain membership, it also deletes the checked accounts' expired matching credentials. See the [OfferCreate](../offers/README.md#3112-state-changes) and [Payment](../payments/README.md#312-state-changes) state changes.[^pd-expiry-delete]
+
+[^pd-expiry-delete]: [`verifyValidDomain`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L334-L368)
 
 **Performance**: Verification iterates through the domain's AcceptedCredentials array (max 10 entries), performing one ledger lookup per credential until a valid match is found.
 

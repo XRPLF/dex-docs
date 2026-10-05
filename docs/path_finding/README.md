@@ -332,7 +332,7 @@ Path finding supports an optional `domain` parameter that enables permissioned D
 - Forwarded to OrderBookDB queries in `addLink` when discovering available books[^pathfinder-domain-orderbook] (see [Section 4.4](#44-addlink))
 - Passed to RippleCalc and Flow during path ranking and execution[^pathfinder-domain-flow] (see [Section 5.1](#51-computepathranks))
 
-[^pathfinder-domain-constructor]: Pathfinder domain parameter storage: [`Pathfinder.cpp:220,230`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L220-L230)
+[^pathfinder-domain-constructor]: Pathfinder domain parameter storage: [`Pathfinder.cpp:220,230`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L219-L229)
 [^pathfinder-domain-orderbook]: OrderBookDB domain filtering flow: `addLink` ([`Pathfinder.cpp:995`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L995)) calls `getPathsOut` ([`Pathfinder.cpp:1145`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1145)), which queries OrderBookDB with domain parameter ([`Pathfinder.cpp:786`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L786))
 [^pathfinder-domain-flow]: Domain passed to Flow: [`Pathfinder.cpp:411`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L411)
 
@@ -703,59 +703,44 @@ All found paths are stored in PathFinder object state, so this function only loo
 
 ```python
 def findPaths(searchLevel, continueCallback) -> bool:
-    # Validate payment request
     if mDstAmount == 0:
-        # Destination amount is 0
-        return False
-    
-    if mSrcAccount == mDstAccount and mDstAccount == mEffectiveDst and mSrcPathAsset == mDstAmount.asset():
-        # No need to send to same account with same currency
         return False
 
+    # Sending an asset to yourself needs no path
+    if mSrcAccount == mDstAccount == mEffectiveDst and mSrcPathAsset == mDstAmount.asset():
+        return False
+
+    # Only the default path can work: any other path would loop back to the source
     if mSrcAccount == mEffectiveDst and mSrcPathAsset == mDstAmount.asset():
-        # Default path might work, but any additional path would loop back to source
-        # (since paths must end at mEffectiveDst which is the source)
         return True
 
-    if not mLedger:
-        # No ledger to search
-        return False
-
     if not accountExists(mSrcAccount):
-        # Source account has to exist. Destination does not if we are sending XRP to it.
         return False
-    
+
     if mEffectiveDst != mDstAccount and not accountExists(mEffectiveDst):
-        # Issuer account has to exist
         return False
 
-    if not accountExists(mDstAccount) and (not isXRP(mDstAmount) or mDstAmount < getAccountReserve()):
-        # New account must be funded with XRP meeting minimum reserve
+    # Only an XRP payment that covers the reserve can create the destination account
+    if not accountExists(mDstAccount) and (not isXRP(mDstAmount) or mDstAmount < reserve()):
         return False
 
-    # Build the source element used by addLink when the path is empty.
-    # If the source asset has a non-XRP issuer, start from the issuer's account;
-    # otherwise start from the source account.
+    # Paths start at the source issuer when one is given for a non-XRP asset
     if mSrcIssuer and not isXRP(mSrcPathAsset) and not isXRP(mSrcIssuer):
-        account = mSrcIssuer
+        start = mSrcIssuer
     else:
-        account = mSrcAccount
-    issuer = xrpAccount() if isXRP(mSrcPathAsset) else account
-    mSource = STPathElement(account, mSrcPathAsset, issuer)
+        start = mSrcAccount
+    mSource = STPathElement(start, mSrcPathAsset, issuer=xrpAccount() if isXRP(mSrcPathAsset) else start)
 
-    # Determine payment type (one of: PaymentType.XrpToXrp, PaymentType.XrpToNonXrp, etc.)
-    paymentType = determinePaymentType(mSrcPathAsset, mDstAmount.asset())
-
-    # Search for paths using types for this payment type
-    for costedPath in mPathTable[paymentType]:
-        if continueCallback.shouldBreak():
+    for costedPath in mPathTable[paymentType(mSrcPathAsset, mDstAmount.asset())]:
+        if continueCallback and not continueCallback():
             return False
+
         if costedPath.searchLevel <= searchLevel:
-            # costedPath.type is a PathType (sequence of node types like "sfd", "sfad", etc.)
             addPathsForType(costedPath.type, continueCallback)
-            if len(mCompletePaths) > PATHFINDER_MAX_COMPLETE_PATHS: # 1000
+            if len(mCompletePaths) > 1000:
                 break
 
+    # Default paths may still work even when no path was found
     return True
 ```
 
@@ -763,7 +748,7 @@ def findPaths(searchLevel, continueCallback) -> bool:
 
 `addPathsForType`[^add-paths-for-type] takes a `PathType` like `"sfad"` and converts it into concrete paths by building incrementally, one node type at a time.
 
-[^add-paths-for-type]: Incremental path building function: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L872-L943)
+[^add-paths-for-type]: Incremental path building function: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L853-L925)
 
 **Parameters:**
 
@@ -790,43 +775,28 @@ Finally, the result is stored in `mPaths[pathType]` and returned.
 ### 4.2.1. addPathsForType Pseudo-Code
 
 ```python
-def addPathsForType(pathType, continueCallback) -> list[STPath]:
-    # pathType is a sequence of node types like "sfd" or "saxfd"
-
-    # Check cache
+def addPathsForType(pathType, continueCallback) -> PathSet:
     if pathType in mPaths:
         return mPaths[pathType]
 
-    # Base case - empty path type
-    if len(pathType) == 0:
-        mPaths[pathType] = []
-        return mPaths[pathType]
+    if pathType == "" or (continueCallback and not continueCallback()):
+        return PathSet()
 
-    if continueCallback.shouldBreak():
-        return []
+    parentPaths = addPathsForType(pathType[:-1], continueCallback)
+    pathsOut = mPaths[pathType] = PathSet()  # skips duplicate paths
 
-    # Recursive case - build parent paths first
-    parentPathType = pathType[:-1]  # Remove last node type (e.g., "sfd" -> "sf")
-    parentPaths = addPathsForType(parentPathType, continueCallback)
-
-    # Add final node type to parent paths
-    nodeType = pathType[-1]  # Get last node type (e.g., 'd' from "sfd")
-    pathsOut = []
-
+    nodeType = pathType[-1]
     if nodeType == NodeType.Source:
-        pathsOut = [empty_path]
-    elif nodeType == NodeType.Accounts:
-        addLinks(currentPaths=parentPaths, incompletePaths=pathsOut, addFlags=afADD_ACCOUNTS, continueCallback=continueCallback)
-    elif nodeType == NodeType.Books:
-        addLinks(currentPaths=parentPaths, incompletePaths=pathsOut, addFlags=afADD_BOOKS, continueCallback=continueCallback)
-    elif nodeType == NodeType.XrpBook:
-        addLinks(currentPaths=parentPaths, incompletePaths=pathsOut, addFlags=afADD_BOOKS | afOB_XRP, continueCallback=continueCallback)
-    elif nodeType == NodeType.DestBook:
-        addLinks(currentPaths=parentPaths, incompletePaths=pathsOut, addFlags=afADD_BOOKS | afOB_LAST, continueCallback=continueCallback)
-    elif nodeType == NodeType.Destination:
-        addLinks(currentPaths=parentPaths, incompletePaths=pathsOut, addFlags=afADD_ACCOUNTS | afAC_LAST, continueCallback=continueCallback)
-
-    mPaths[pathType] = pathsOut
+        pathsOut.add(STPath())
+    else:
+        flags = {
+            NodeType.Accounts: afADD_ACCOUNTS,
+            NodeType.Books: afADD_BOOKS,
+            NodeType.XrpBook: afADD_BOOKS | afOB_XRP,
+            NodeType.DestBook: afADD_BOOKS | afOB_LAST,
+            NodeType.Destination: afADD_ACCOUNTS | afAC_LAST,
+        }[nodeType]
+        addLinks(parentPaths, pathsOut, flags, continueCallback)
     return pathsOut
 ```
 
@@ -850,16 +820,16 @@ def addPathsForType(pathType, continueCallback) -> list[STPath]:
 ```python
 def addLinks(currentPaths, incompletePaths, addFlags, continueCallback):
     for path in currentPaths:
-        if continueCallback.shouldBreak():
+        if continueCallback and not continueCallback():
             return
-        addLink(currentPath=path, incompletePaths=incompletePaths, addFlags=addFlags, continueCallback=continueCallback)
+        addLink(path, incompletePaths, addFlags, continueCallback)
 ```
 
 ## 4.4. addLink
 
 `addLink`[^add-link] is where the actual path expansion happens - it's the function that queries the ledger and creates new path branches.
 
-[^add-link]: Core path expansion function: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L972-L1301)
+[^add-link]: Core path expansion function: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L964-L1297)
 
 **Parameters:**
 
@@ -890,7 +860,7 @@ The function's behavior varies significantly between account expansion and book 
 
 When the path's current endpoint is on XRP and the destination amount is XRP and the current path is non-empty, it adds the path to complete paths.[^xrp-endpoint-check] Empty paths are not added because they would represent XRP->XRP payments and those do not require pathfinding.
 
-[^xrp-endpoint-check]: XRP endpoint completion check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1019-L1027)
+[^xrp-endpoint-check]: XRP endpoint completion check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L988-L996)
 
 For non-XRP endpoints, the function queries for trust lines or MPTs connected to the account at the path's current endpoint.
 
@@ -914,14 +884,14 @@ Each asset connection undergoes these checks in order:
 4. **Loop detection**[^loop-detection] - Rejects accounts already visited using `hasSeen(account, asset, issuer)`
 5. **Liquidity and NoRipple check**[^liquidity-check]:
    - For trust lines: Rejects if (balance <= 0 AND (no peer limit OR peer limit exhausted OR unauthorized when `lsfRequireAuth` is set)) OR (both the previous link and current link have NoRipple set)
-   - For MPTs: Rejects if zero balance OR maxed out OR not authorized
+   - For MPTs: Rejects if the path-end account cannot send the MPT (the issuer cannot when the issuance is maxed out, and a holder cannot when its balance is zero) OR it is not authorized
 6. **Source loop prevention**[^source-loop] - Rejects accounts that would loop back to the source
 
 [^currency-match]: Currency/asset match check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1082-L1092)
 [^dest-bypass]: Destination account bypass check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1069-L1073)
 [^dest-only]: Destination-only filtering check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1077-L1080)
 [^loop-detection]: Loop detection using hasSeen: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1110)
-[^liquidity-check]: Liquidity and NoRipple check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1093-L1108)
+[^liquidity-check]: Liquidity and NoRipple check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1062-L1080)
 [^source-loop]: Source loop prevention check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1138-L1141)
 [^get-ripple-lines-call]: getRippleLines call in addLink: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1161-L1163)
 [^is-no-ripple-out]: isNoRippleOut checks whether the last account in the path has NoRipple set on its outgoing link: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L958-L979)
@@ -929,23 +899,23 @@ Each asset connection undergoes these checks in order:
 [^get-ripple-lines-direction]: LineDirection::incoming excludes trust lines where the account has NoRipple set: [`TrustLine.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/TrustLine.cpp#L61)
 [^noripple-candidate-check]: Per-candidate NoRipple check in addLink: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1101)
 [^asset-cache-superset]: AssetCache returns the outgoing superset when incoming is requested but outgoing is already cached: [`AssetCache.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/AssetCache.cpp#L78-L87)
-[^getpathsout]: getPathsOut computes the paths out score for an account: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L748-L835)
+[^getpathsout]: getPathsOut computes the paths out score for an account: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L748-L835)
 [^getpathsout-auth]: getPathsOut checks lsfRequireAuth on the candidate account: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L771-L775)
 [^getpathsout-booksize]: Score starts with order book size: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L786)
 [^getpathsout-destination-bonus]: Destination bonus of +10000: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L800-L804)
 [^getpathsout-frozen]: Global freeze check in getPathsOut: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L776-L784)
-[^getpathsout-iou-loop]: IOU trust line scoring loop: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L788-L830)
+[^getpathsout-iou-loop]: IOU trust line scoring loop: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L788-L830)
 [^getpathsout-noripple]: getPathsOut skips trust lines where the peer has NoRipple set: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L805-L806)
 [^getpathsout-freeze]: getPathsOut skips trust lines where the peer has frozen the line: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L807-L808)
-[^getpathsout-mpt-loop]: MPT scoring loop: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L813-L831)
-[^getpathsout-mpt-match]: MPT ID match check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820)
-[^getpathsout-mpt-balance]: MPT zero balance or maxed out check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820)
-[^getpathsout-mpt-auth]: MPT authorization check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820)
+[^getpathsout-mpt-loop]: MPT scoring loop: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L813-L831)
+[^getpathsout-mpt-match]: MPT ID match check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820)
+[^getpathsout-mpt-balance]: MPT send check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820), [`MPT.h`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/MPT.h#L35-L41)
+[^getpathsout-mpt-auth]: MPT authorization check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L818-L820)
 [^getpathsout-mpt-destination]: MPT destination bonus of +10000: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L821-L825)
 [^getpathsout-mpt-frozen]: MPT individual frozen check: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L826-L827)
 [^getpathsout-mpt-count]: MPT count increment: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/xrpld/rpc/detail/Pathfinder.cpp#L827-L828)
 [^compare-account-candidate]: compareAccountCandidate sorts by priority descending, then account ID descending: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L108-L124)
-[^dest-complete-path]: Destination account with matching asset completes the path: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1121-L1130)
+[^dest-complete-path]: Destination account with matching asset completes the path: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1094-L1103)
 [^dest-high-priority]: Destination account with non-matching asset receives high priority directly: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1132-L1136)
 [^getpathsout-zero-filter]: Candidates with score 0 are not added: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1152)
 [^candidate-extend]: Selected candidates are extended into incomplete paths: [`Pathfinder.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/xrpld/rpc/detail/Pathfinder.cpp#L1196-L1206)
@@ -968,7 +938,7 @@ Candidates that score 0 are excluded entirely[^getpathsout-zero-filter], because
    - **+1** otherwise
 5. For MPTs, the function iterates over MPTs from `getMPTs(account)` and for each MPT[^getpathsout-mpt-loop]:
    - **Skipped** if the MPT ID does not match the current asset[^getpathsout-mpt-match]
-   - **Skipped** if zero balance or maxed out[^getpathsout-mpt-balance]
+   - **Skipped** if the account cannot send the MPT. The issuer cannot when the issuance is maxed out, and a holder cannot when its balance is zero[^getpathsout-mpt-balance]
    - **Skipped** if authorization is required (step 2)[^getpathsout-mpt-auth]
    - **+10000** if the current asset matches the destination asset and the peer is the destination account[^getpathsout-mpt-destination]
    - **Skipped** if frozen (redundant with the outer freeze check in step 1, but present in the code)[^getpathsout-mpt-frozen]
@@ -997,127 +967,102 @@ After adding the book element, the function determines whether the path is compl
 ```python
 def addLink(currentPath, incompletePaths, addFlags, continueCallback):
     pathEnd = currentPath.back() if currentPath else mSource
-    endPathAsset = pathEnd.getPathAsset()
-    endAccount = pathEnd.getAccountID()
-    isOnXRP = isXRP(endPathAsset)
-    hasEffectiveDst = mEffectiveDst != mDstAccount
-    destOnly = afAC_LAST in addFlags
+    endAsset, endAccount = pathEnd.asset, pathEnd.account
 
     if afADD_ACCOUNTS in addFlags:
-        if isOnXRP:
-            if mDstAmount.isXRP() and not currentPath.empty():
-                mCompletePaths.add(currentPath)  # Complete XRP->XRP path
-        elif endAccount.exists():
-            # Check if the trust line between the previous account and the endpoint account
-            # has NoRipple set on the endpoint account's side
+        if isXRP(endAsset):
+            if isXRP(mDstAmount) and currentPath:
+                mCompletePaths.add(currentPath)
+        elif accountExists(endAccount):
+            destOnly = afAC_LAST in addFlags
             noRippleOut = isNoRippleOut(currentPath)
-            direction = LineDirection.incoming if noRippleOut else LineDirection.outgoing
 
-            # Get trust lines or MPTs from current account, based on asset type.
-            # For IOUs, getRippleLines returns trust lines filtered by direction:
-            #   incoming = only lines where the account does not have NoRipple set (best effort, see AssetCache)
-            #   outgoing = all trust lines
-            # For MPTs, getMPTs returns all MPT holdings for the account.
-            if isIOU(endPathAsset):
-                assets = mAssetCache.getRippleLines(endAccount, direction)
+            if isIOU(endAsset):
+                links = mAssetCache.getRippleLines(endAccount, incoming if noRippleOut else outgoing)
             else:
-                assets = mAssetCache.getMPTs(endAccount)
+                links = mAssetCache.getMPTs(endAccount)  # the next hop is always the MPT's issuer
+
             candidates = []
-
-            for asset in assets:
-                if continueCallback.shouldBreak():
+            for link in links:
+                if continueCallback and not continueCallback():
                     return
 
-                # Get peer account (for trust lines) or issuer account (for MPTs)
-                peerAccount = asset.getAccountIDPeer() if isTrustLine(asset) else asset.getIssuer()
+                peer = link.peer
 
-                # Skip if issuer bypass
-                if hasEffectiveDst and peerAccount == mDstAccount:
+                # Paths only need to reach the issuer, so the destination account is never a hop
+                if mEffectiveDst != mDstAccount and peer == mDstAccount:
                     continue
 
-                # Check if this is the destination
-                isDestination = peerAccount == mEffectiveDst
-
-                # Destination-only filter
-                if destOnly and not isDestination:
+                if destOnly and peer != mEffectiveDst:
                     continue
 
-                # Skip if asset does not match the path's current currency/MPTID
-                if not correctAsset(asset, endPathAsset):
+                if link.asset != endAsset or currentPath.hasSeen(peer, endAsset, peer):
                     continue
 
-                # Skip if creates loop
-                if currentPath.hasSeen(peerAccount, endPathAsset, peerAccount):
-                    continue
-
-                # Skip if insufficient liquidity or NoRipple violation
                 # For trust lines: (balance > 0 OR (available credit AND authorized))
-                #                   AND NOT (noRippleOut AND asset.getNoRipple())
-                # For MPTs: balance > 0 AND not maxed out AND authorized
-                if not hasLiquidity(asset):
+                #                   AND NOT (noRippleOut AND NoRipple on the link)
+                # For MPTs: (holder: balance > 0, issuer: not maxed out) AND authorized
+                if not hasLiquidity(link):
                     continue
 
-                # Handle destination account
-                if isDestination:
-                    if endPathAsset == mDstAmount.asset():
-                        if not currentPath.empty():
-                            mCompletePaths.add(currentPath)  # Complete path
+                if peer == mEffectiveDst:
+                    if endAsset == mDstAmount.asset():
+                        if currentPath:
+                            mCompletePaths.add(currentPath)
                     elif not destOnly:
-                        candidates.add({priority: HIGH_PRIORITY, account: peerAccount})
-                # Skip if going back to source
-                elif peerAccount == mSrcAccount:
-                    continue
-                else:
-                    # Rank by paths out
-                    pathsOut = getPathsOut(endPathAsset, peerAccount)
-                    if pathsOut > 0:
-                        candidates.add({priority: pathsOut, account: peerAccount})
+                        candidates.append((HIGH_PRIORITY, peer))
+                elif peer != mSrcAccount:
+                    score = getPathsOut(endAsset, peer)
+                    if score > 0:
+                        candidates.append((score, peer))
 
-            # Sort and select top candidates
-            candidates.sort(by: priority descending, then account ID descending)
-            maxCandidates = 10 if endAccount != mSrcAccount else 50
-
-            for candidate in candidates[:maxCandidates]:
-                if continueCallback.shouldBreak():
+            candidates.sort(by=score descending, then account descending)
+            # More branches are allowed straight from the source
+            limit = 50 if endAccount == mSrcAccount else 10
+            for _, account in candidates[:limit]:
+                if continueCallback and not continueCallback():
                     return
-                newPath = currentPath + [accountElement(candidate.account)]
-                incompletePaths.add(newPath)
+                incompletePaths.add(currentPath + [accountElement(account, endAsset)])
 
-    if afADD_BOOKS in addFlags:
-        if afOB_XRP in addFlags:
-            # Only add book to XRP (includes domain filtering if mDomain is set)
-            if not isOnXRP and app.orderBookDB.isBookToXRP(endAsset, mDomain):
-                incompletePaths.add(currentPath.append(xrpBookElement))
-        else:
-            # Add all viable order books (includes domain filtering if mDomain is set)
-            books = app.orderBookDB.getBooksByTakerPays(endAsset, mDomain)
+    if afADD_BOOKS in addFlags and afOB_XRP in addFlags:
+        if not isXRP(endAsset) and orderBookDB.isBookToXRP(endAsset, mDomain):
+            incompletePaths.add(currentPath + [xrpBookElement()])
 
-            for book in books:
-                if currentPath.hasSeen(xrpAccount(), book.out, book.out.getIssuer()):
-                    continue
-                if issueMatchesOrigin(book.out):
-                    continue
-                # afOB_LAST keeps only books whose output token matches the destination.
-                # equalTokens compares currency/MPTID and ignores the issuer.
-                if afOB_LAST in addFlags and not equalTokens(book.out, mDstAmount.asset()):
-                    continue
+    elif afADD_BOOKS in addFlags:
+        for book in orderBookDB.getBooksByTakerPays(endAsset, mDomain):
+            if continueCallback and not continueCallback():
+                return
 
-                newPath = currentPath.append(bookElement(book))
+            out = book.out
 
-                if isXRP(book.out):
-                    if mDstAmount.isXRP():
-                        mCompletePaths.add(newPath)  # Complete path
-                    else:
-                        incompletePaths.add(newPath)
-                elif not currentPath.hasSeen(book.out.getIssuer(), book.out, book.out.getIssuer()):
-                    if hasEffectiveDst and book.out.getIssuer() == mDstAccount and equalTokens(book.out, mDstAmount.asset()):
-                        continue  # Skipped required issuer
-                    elif book.out.getIssuer() == mEffectiveDst and book.out.asset == mDstAmount.asset():
-                        mCompletePaths.add(newPath)  # Complete path
-                    else:
-                        # If the path already ends in an account, the issuer-bearing element
-                        # replaces that trailing account rather than being appended after it.
-                        incompletePaths.add(newPath.append(issuerAccount(book.out)))
+            if currentPath.hasSeen(xrpAccount(), out, out.issuer) or issueMatchesOrigin(out):
+                continue
+
+            # afOB_LAST keeps books outputting the destination IOU currency
+            # (regardless of issuer) or the exact destination MPT issuance
+            if afOB_LAST in addFlags and not equalTokens(out, mDstAmount.asset()):
+                continue
+
+            if isXRP(out):
+                newPath = currentPath + [xrpBookElement()]
+                if isXRP(mDstAmount):
+                    mCompletePaths.add(newPath)
+                else:
+                    incompletePaths.add(newPath)
+            elif not currentPath.hasSeen(out.issuer, out, out.issuer):
+                # In book -> account -> book, the new book replaces the redundant account
+                if len(currentPath) >= 2 and currentPath[-1].isAccount() and currentPath[-2].isOffer():
+                    newPath = currentPath[:-1] + [bookElement(out)]
+                else:
+                    newPath = currentPath + [bookElement(out)]
+
+                if mEffectiveDst != mDstAccount and out.issuer == mDstAccount and equalTokens(out, mDstAmount.asset()):
+                    continue  # the path would skip the required issuer
+
+                if out.issuer == mEffectiveDst and equalTokens(out, mDstAmount.asset()):
+                    mCompletePaths.add(newPath)
+                else:
+                    incompletePaths.add(newPath + [accountElement(out.issuer, out)])
 ```
 
 ## 4.5. OrderBookDB
@@ -1225,31 +1170,20 @@ With `mRemainingAmount` calculated, `computePathRanks` calls `rankPaths` to eval
 ### 5.1.1. computePathRanks Pseudo-Code
 
 ```python
-def computePathRanks(maxPaths: int, continueCallback):
-    # convertAmount returns the largest possible amount if convert_all_ is true (to find max liquidity)
-    # otherwise returns mDstAmount unchanged
+def computePathRanks(maxPaths, continueCallback):
     mRemainingAmount = convertAmount(mDstAmount, convert_all_)
 
-    # The default path is the direct path that always exists (source -> destination)
-    # We test it first to see how much it can deliver, then rank additional paths
-    # based on what they add beyond the default
-    sandbox = PaymentSandbox(mLedger)
-    inputs = Input(partialPaymentAllowed=True)
-    rc = RippleCalc.rippleCalculate(
-        view=sandbox,
-        maxAmountIn=mSrcAmount,
-        deliver=mRemainingAmount,
-        account=mDstAccount,
-        issuer=mSrcAccount,
-        paths=[],  # Empty path set = test default path only
-        domain=mDomain,
-        inputs=inputs
-    )
+    # Measure the default path first, so the other paths are ranked only by what
+    # they add beyond it. No explicit paths means the default path alone.
+    try:
+        rc = rippleCalculate(PaymentSandbox(mLedger), mSrcAmount, mRemainingAmount,
+                             dstAccount=mDstAccount, srcAccount=mSrcAccount, paths=[],
+                             domain=mDomain, inputs=Input(partialPaymentAllowed=True))
+        if rc.result == tesSUCCESS:
+            mRemainingAmount -= rc.actualAmountOut
+    except Exception:
+        pass  # mRemainingAmount stays unchanged
 
-    if rc.success():
-        mRemainingAmount -= rc.actualAmountOut
-
-    # Rank all found paths
     rankPaths(maxPaths, mCompletePaths, mPathRanks, continueCallback)
 ```
 
@@ -1264,55 +1198,37 @@ def computePathRanks(maxPaths: int, continueCallback):
 | `view`        | PaymentSandbox view of the ledger for simulation                                                                                                                                                                  | ✅        |
 | `maxAmountIn` | Maximum amount willing to spend from source (SendMax)                                                                                                                                                             | ✅        |
 | `deliver`     | Amount to deliver to destination                                                                                                                                                                                  | ✅        |
-| `account`     | Destination account ID                                                                                                                                                                                            | ✅        |
-| `issuer`      | Source account ID                                                                                                                                                                                                 | ✅        |
+| `dstAccount`  | Destination account ID                                                                                                                                                                                            | ✅        |
+| `srcAccount`  | Source account ID                                                                                                                                                                                                 | ✅        |
 | `paths`       | Set of paths to test                                                                                                                                                                                              | ✅        |
 | `domain`      | Optional domain ID                                                                                                                                                                                                | ❌        |
 | `inputs`      | Optional Input struct containing flags: `defaultPathsAllowed` (whether to test default path), `partialPaymentAllowed` (whether partial delivery is acceptable), `limitQuality` (whether to enforce quality limit) | ❌        |
 
 ```python
-def rippleCalculate(view, maxAmountIn, deliver, account, issuer, paths, domain, inputs=None):
-    # Create sandbox for simulation
-    sandbox = PaymentSandbox(view)
-
-    # Extract parameters from inputs or use defaults
+def rippleCalculate(view, maxAmountIn, deliver, dstAccount, srcAccount, paths, domain, inputs=None):
     defaultPaths = inputs.defaultPathsAllowed if inputs else True
     partialPayment = inputs.partialPaymentAllowed if inputs else False
 
-    # Calculate quality limit if requested
-    qualityLimit = None
+    limitQuality = None
     if inputs and inputs.limitQuality and maxAmountIn > 0:
-        qualityLimit = Quality(maxAmountIn / deliver)
+        limitQuality = Quality(Amounts(in=maxAmountIn, out=deliver))
 
-    # Determine sendMax (if different from source account's native currency)
-    sendMax = maxAmountIn if (maxAmountIn >= 0 or
-                               maxAmountIn.currency != deliver.currency or
-                               maxAmountIn.issuer != issuer) else None
+    # A negative maxAmountIn in the delivered asset, issued by the source, means no limit
+    sendMax = maxAmountIn
+    if maxAmountIn < 0 and equalTokens(maxAmountIn, deliver) and maxAmountIn.issuer == srcAccount:
+        sendMax = None
 
-    # Call Flow engine to execute payment simulation
-    flowResult = flow(
-        sandbox,
-        deliver,
-        issuer,
-        account,
-        paths,
-        defaultPaths=defaultPaths,
-        partialPayment=partialPayment,
-        limitQuality=qualityLimit,
-        sendMax=sendMax,
-        domain=domain
-    )
+    sandbox = PaymentSandbox(view)
+    try:
+        result = flow(sandbox, deliver, srcAccount, dstAccount, paths, defaultPaths,
+                      partialPayment, limitQuality, sendMax, domain)
+    except Exception:
+        return Result(tecINTERNAL)
 
-    # Commit the simulated consumption back to the caller's view, so that sequential
-    # rippleCalculate calls (e.g. the two calls in getPathLiquidity) measure liquidity
-    # incrementally on the depleted state rather than double-counting it.
+    # Merge the simulated changes into the caller's sandbox, so that sequential calls
+    # (e.g. the two in getPathLiquidity) measure liquidity on the depleted state
     sandbox.apply(view)
-
-    return {
-        result: flowResult.result,
-        actualAmountIn: flowResult.actualAmountIn,
-        actualAmountOut: flowResult.actualAmountOut
-    }
+    return result
 ```
 
 ## 5.2. rankPaths
@@ -1345,31 +1261,26 @@ def rankPaths(maxPaths, paths, rankedPaths, continueCallback):
     rankedPaths.clear()
 
     if convert_all_:
-        minDstAmount = largestAmount(dstAmount)
+        # With partial payment allowed, asking for the largest amount finds the most liquidity
+        minDstAmount = largestAmount(mDstAmount)
     else:
-        minDstAmount = dstAmount / (maxPaths + 2)
+        # Ignore paths that move only very small amounts
+        minDstAmount = mDstAmount / (maxPaths + 2)
 
-    for i, path in enumerate(paths):
-        if continueCallback.shouldBreak():
+    for index, path in enumerate(paths):
+        if continueCallback and not continueCallback():
             return
-        
-        ter, liquidity, quality = getPathLiquidity(path, minDstAmount)
 
-        if ter == tesSUCCESS:
-            rankedPaths.add({
-                quality: quality,
-                length: len(path),
-                liquidity: liquidity,
-                index: i
-            })
+        if not path:
+            continue
 
-    # Sort by quality, liquidity, length
-    rankedPaths.sort(key=lambda rank: (
-        rank.quality if not convert_all_ else 0,  # Quality first (unless convert_all_)
-        -rank.liquidity,  # Higher liquidity better (negative for desc sort)
-        rank.length,      # Shorter better
-        -rank.index       # Tie breaker
-    ))
+        result, liquidity, quality = getPathLiquidity(path, minDstAmount)
+        if result == tesSUCCESS:
+            rankedPaths.append(PathRank(quality, len(path), liquidity, index))
+
+    # Best first: lower quality value (lower cost), then more liquidity, then shorter.
+    # Convert-all mode ignores quality.
+    rankedPaths.sort(key=lambda r: (0 if convert_all_ else r.quality, -r.liquidity, r.length, -r.index))
 ```
 
 ## 5.3. getPathLiquidity
@@ -1397,46 +1308,31 @@ The function returns the total liquidity the path can deliver and its initial qu
 
 ```python
 def getPathLiquidity(path, minDstAmount):
-    pathSet = [path]
-    sandbox = PaymentSandbox(ledger)
+    sandbox = PaymentSandbox(mLedger)
 
-    # Test minimum liquidity (default paths disabled, test only this path)
+    # Default paths are off, so only this path's liquidity is measured
     inputs = Input(defaultPathsAllowed=False, partialPaymentAllowed=convert_all_)
-    rc = RippleCalc.rippleCalculate(
-        view=sandbox,
-        maxAmountIn=srcAmount,
-        deliver=minDstAmount,
-        account=dstAccount,
-        issuer=srcAccount,
-        paths=pathSet,
-        domain=domain,
-        inputs=inputs
-    )
 
-    if rc.result != tesSUCCESS:
-        return rc.result
+    try:
+        rc = rippleCalculate(sandbox, mSrcAmount, minDstAmount, mDstAccount, mSrcAccount,
+                             paths=[path], domain=mDomain, inputs=inputs)
+        if rc.result != tesSUCCESS:
+            return rc.result
 
-    quality = rc.actualAmountIn / rc.actualAmountOut
-    amountOut = rc.actualAmountOut
+        quality = rc.actualAmountIn / rc.actualAmountOut
+        amountOut = rc.actualAmountOut
 
-    if not convert_all_:
-        # Test remaining liquidity
-        inputs2 = Input(defaultPathsAllowed=False, partialPaymentAllowed=True)
-        rc = RippleCalc.rippleCalculate(
-            view=sandbox,
-            maxAmountIn=srcAmount,
-            deliver=dstAmount - amountOut,
-            account=dstAccount,
-            issuer=srcAccount,
-            paths=pathSet,
-            domain=domain,
-            inputs=inputs2
-        )
+        if not convert_all_:
+            # Probe for liquidity beyond the minimum
+            inputs.partialPaymentAllowed = True
+            rc = rippleCalculate(sandbox, mSrcAmount, mDstAmount - amountOut, mDstAccount, mSrcAccount,
+                                 paths=[path], domain=mDomain, inputs=inputs)
+            if rc.result == tesSUCCESS:
+                amountOut += rc.actualAmountOut
 
-        if rc.result == tesSUCCESS:
-            amountOut += rc.actualAmountOut
-
-    return (tesSUCCESS, amountOut, quality)
+        return (tesSUCCESS, amountOut, quality)
+    except Exception:
+        return tefEXCEPTION
 ```
 
 # 6. Path Selection
@@ -1479,70 +1375,57 @@ The function applies different selection rules depending on how many path slots 
 
 ```python
 def getBestPaths(maxPaths, fullLiquidityPath, extraPaths, srcIssuer, continueCallback):
-    # Rank extra paths
+    if not mCompletePaths and not extraPaths:
+        return mCompletePaths
+
+    issuerIsSender = isXRP(mSrcPathAsset) or srcIssuer == mSrcAccount
+
     extraPathRanks = []
     rankPaths(maxPaths, extraPaths, extraPathRanks, continueCallback)
 
     bestPaths = []
     remaining = mRemainingAmount
-    issuerIsSender = isXRP(srcAsset) or (srcIssuer == srcAccount)
+    i = j = 0  # positions in mPathRanks and extraPathRanks
 
-    i = 0  # index into mPathRanks
-    j = 0  # index into extraPathRanks
-
-    # Merge and select best paths
     while i < len(mPathRanks) or j < len(extraPathRanks):
-        # Reset per-iteration flags (the C++ declares these inside the loop body)
-        usePath = False
-        useExtra = False
-        startsWithIssuer = False
+        if continueCallback and not continueCallback():
+            break
 
-        # Determine which path to use next
-        if i >= len(mPathRanks):
-            useExtra = True
-        elif j >= len(extraPathRanks):
-            usePath = True
-        elif extraPathRanks[j].quality < mPathRanks[i].quality:
-            useExtra = True
-        elif extraPathRanks[j].quality > mPathRanks[i].quality:
-            usePath = True
-        elif extraPathRanks[j].liquidity > mPathRanks[i].liquidity:
-            useExtra = True
-        elif extraPathRanks[j].liquidity < mPathRanks[i].liquidity:
-            usePath = True
+        # Take the better next rank: lower quality value, then more liquidity.
+        # Identical ranks are likely the same path, so both are consumed.
+        a = mPathRanks[i] if i < len(mPathRanks) else None
+        b = extraPathRanks[j] if j < len(extraPathRanks) else None
+        if a and b and (a.quality, a.liquidity) == (b.quality, b.liquidity):
+            usePath = useExtra = True
         else:
-            usePath = True
-            useExtra = True  # Both might be same path
+            useExtra = a is None or (b is not None and (b.quality, -b.liquidity) < (a.quality, -a.liquidity))
+            usePath = not useExtra
 
-        rank = mPathRanks[i] if usePath else extraPathRanks[j]
+        rank = a if usePath else b
         path = mCompletePaths[rank.index] if usePath else extraPaths[rank.index]
 
-        if useExtra:
-            j += 1
-        if usePath:
-            i += 1
+        i += usePath
+        j += useExtra
 
         pathsLeft = maxPaths - len(bestPaths)
 
-        if pathsLeft == 0 and not fullLiquidityPath.empty():
+        if pathsLeft <= 0 and fullLiquidityPath:
             break
 
-        # Validate issuer constraint
-        if not issuerIsSender and usePath:
-            if isDefaultPath(path) or path[0].getAccountID() != srcIssuer:
-                continue  # Skip paths that don't start with issuer
-            startsWithIssuer = True
+        # A discovered path must start at the source issuer. The issuer element is
+        # dropped, because Flow adds it back during path normalization.
+        if usePath and not issuerIsSender:
+            if isDefaultPath(path) or path[0].account != srcIssuer:
+                continue
+            path = path[1:]
 
-        # Apply selection rules
-        if pathsLeft > 1 or (pathsLeft > 0 and rank.liquidity >= remaining):
-            # Add to best paths
-            pathsLeft -= 1
+        # The last slot goes only to a path that covers everything still missing
+        if pathsLeft > 1 or (pathsLeft == 1 and rank.liquidity >= remaining):
             remaining -= rank.liquidity
-            bestPaths.add(removeIssuer(path) if startsWithIssuer else path)
-
-        elif pathsLeft == 0 and rank.liquidity >= dstAmount and fullLiquidityPath.empty():
-            # Found extra path that can handle full amount
-            fullLiquidityPath = (removeIssuer(path) if startsWithIssuer else path)
+            bestPaths.append(path)
+        elif pathsLeft == 0 and rank.liquidity >= mDstAmount and not fullLiquidityPath:
+            # A path that can carry the whole payment alone
+            fullLiquidityPath = path
 
     return bestPaths
 ```

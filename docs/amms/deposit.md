@@ -1,8 +1,8 @@
 # Index
 
 - [1. Introduction](#1-introduction)
-- [2. applyGuts](#2-applyguts)
-  - [2.1. applyGuts Pseudo-Code](#21-applyguts-pseudo-code)
+- [2. Deposit Logic](#2-deposit-logic)
+  - [2.1. Pseudo-Code](#21-pseudo-code)
 - [3. getTradingFee](#3-gettradingfee)
   - [3.1. getTradingFee Pseudo-Code](#31-gettradingfee-pseudo-code)
 - [4. Multi-Asset Deposit Modes](#4-multi-asset-deposit-modes)
@@ -11,7 +11,6 @@
   - [4.2. equalDepositTokens (tfLPToken)](#42-equaldeposittokens-tflptoken)
     - [4.2.1. equalDepositTokens Pseudo-Code](#421-equaldeposittokens-pseudo-code)
   - [4.3. equalDepositInEmptyState (tfTwoAssetIfEmpty)](#43-equaldepositinemptystate-tftwoassetifempty)
-    - [4.3.1. equalDepositInEmptyState Pseudo-Code](#431-equaldepositinemptystate-pseudo-code)
 - [5. Single-Asset Deposit Modes](#5-single-asset-deposit-modes)
   - [5.1. singleDeposit (tfSingleAsset)](#51-singledeposit-tfsingleasset)
     - [5.1.1. singleDeposit Pseudo-Code](#511-singledeposit-pseudo-code)
@@ -33,194 +32,68 @@ The [AMM documentation](README.md#32-ammdeposit-transaction) describes the high-
 Throughout the document we refer to equations by their number in the [XLS-30 specification](https://github.com/XRPLF/XRPL-Standards/tree/master/XLS-0030-automated-market-maker).
 AMM helpers use **token** as a subject in many function names. This refers to any supported asset in the system, not only a particular token implementation, like trust lines or MPTs.
 
-# 2. applyGuts
+# 2. Deposit Logic
 
-The `applyGuts` function[^apply-guts] is the main entry point for processing AMMDeposit transactions.
-
-It retrieves the AMM ledger entry and current pool balances, then determines which trading fee applies to the depositor (regular or discounted for [auction slot holders](#3-gettradingfee)). Based on the transaction flags and provided fields, it dispatches to one of deposit mode handlers: three [multi-asset modes](#4-multi-asset-deposit-modes) that maintain proportional deposits or reinitialize empty pools, and three [single-asset modes](#5-single-asset-deposit-modes) that perform single-sided deposits. Each mode handler calculates the deposit amounts and LP tokens to issue, then calls the [common deposit function](#6-common-deposit-function) to execute the actual asset transfers and update the pool state.
+A deposit[^apply-guts] reads the pool's balances and picks the trading fee that applies to the depositor, which is lower for [auction slot holders](#3-gettradingfee). The transaction flags then select a deposit mode. The [multi-asset modes](#4-multi-asset-deposit-modes) keep the pool's asset ratio or refill an empty pool. The [single-asset modes](#5-single-asset-deposit-modes) add one asset only. Each mode calculates the amounts and LP tokens, then calls the [common deposit function](#6-common-deposit-function) to move the assets and issue the LP tokens.
 
 Under the `fixCleanup3_3_0` amendment, `preclaim` runs the freeze checks for both pool assets whether or not they are deposited. See the [failure conditions](README.md#322-failure-conditions) for the resulting behavior change.
 
-[^apply-guts]: `AMMDeposit::applyGuts`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L412-L526) 
+Under the `fixCleanup3_4_0` amendment, the mode dispatch is wrapped in a guard that catches an out-of-range solved amount.[^tflptoken-guard] See the [failure conditions](README.md#322-failure-conditions) for the resulting behavior change.
 
-## 2.1. applyGuts Pseudo-Code
+[^tflptoken-guard]: In 3.4.0, the tfLPToken mode (`equalDepositTokens`) catches these errors itself and returns `tecINTERNAL`, so the guard never sees them: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L745-L751)
+
+[^apply-guts]: `AMMDeposit::applyGuts`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L412-L548) 
+
+## 2.1. Pseudo-Code
 
 ```python
-def applyGuts(sb: &Sandbox, tx: Transaction):
-    amount = tx[sfAmount]
-    amount2 = tx[sfAmount2]
-    ePrice = tx[sfEPrice]
-    ammSle = sb.getAMM(amount, amount2)
-    if not ammSle:
-        return tecINTERNAL
+def deposit_into_pool(pool, depositor, tx):
+    # The AMM's reserves, in the order of Amount and Amount2. Frozen or locked
+    # reserves, and MPTs the AMM may not hold, read as zero.
+    balance1, balance2, lp_supply = pool.balances(tx.Amount, tx.Amount2)
 
-    ammAccountId = ammSle[sfAccount]
-
-    # In `xrpld`, this is called "expected", but probably only to reflect the returned type. A better name is "existing" or "currentBalances"
-    # FreezeHandling.ZeroIfFrozen: treat frozen assets as having zero balance
-    # AuthHandling.ZeroIfUnauthorized: treat unauthorized MPT holders as having zero balance
-    currentBalances = ammHolds(sb, ammSle, amount, amount2, FreezeHandling.ZeroIfFrozen, AuthHandling.ZeroIfUnauthorized)
-    if not currentBalances:
-        return currentBalances.error()
-
-    # Current pool balance of asset1
-    # Current pool balance of asset2
-    # Total outstanding LP Tokens
-    amountBalance, amount2Balance, lptAMMBalance = currentBalances
-
-    # Determine which trading fee to use
-    if lptAMMBalance == 0:
-        # Empty pool: depositor can set new trading fee (like AMMCreate)
-        tfee = tx[sfTradingFee] if tx.has(sfTradingFee) else 0
+    if lp_supply == 0:
+        fee = tx.TradingFee or 0              # an empty pool takes a new fee, as in AMMCreate
     else:
-        # Normal pool: get current trading fee (with potential discount)
-        # Returns discounted fee if account is auction slot holder or authorized
-        # Otherwise returns regular AMM trading fee
-        tfee = getTradingFee(view, ammSle, accountID_)
+        fee = getTradingFee(pool, depositor)  # discounted for an active slot's owner and authorized accounts
 
-    subTxType = tx.getFlags() & tfDepositSubTx
+    deposit_mode = {
+        tfTwoAsset: equalDepositLimit,
+        tfLPToken: equalDepositTokens,
+        tfTwoAssetIfEmpty: equalDepositInEmptyState,
+        tfSingleAsset: singleDeposit,
+        tfOneAssetLPToken: singleDepositTokens,
+        tfLimitLPToken: singleDepositEPrice,
+    }[tx.deposit_mode_flag]
 
-    # Dispatch to appropriate deposit mode handler
-    # Returns (result_code, new_lp_token_balance)
-    if subTxType == tfTwoAsset:
-        # Proportional deposit with max constraints on both assets
-        result, newLPTokenBalance = equalDepositLimit(
-            sb,
-            ammAccountID,
-            amountBalance,
-            amount2Balance,
-            lptAMMBalance,
-            amount,              # max amount1 to deposit
-            amount2,             # max amount2 to deposit
-            lpTokensDeposit,     # optional: min LP tokens expected
-            tfee
-        )
+    try:
+        new_lp_supply = deposit_mode(pool, balance1, balance2, lp_supply, tx, fee)
+    except AmountOutOfRange:
+        if fixCleanup3_4_0:
+            fail(tecAMM_FAILED)
+        fail(tefEXCEPTION)
 
-    elif subTxType == tfOneAssetLPToken:
-        # Single asset deposit for exact LP tokens
-        result, newLPTokenBalance = singleDepositTokens(
-            sb,
-            ammAccountID,
-            amountBalance,
-            amount,              # max amount to pay
-            lptAMMBalance,
-            lpTokensDeposit,     # exact LP tokens desired
-            tfee
-        )
-
-    elif subTxType == tfLimitLPToken:
-        # Single asset deposit with effective price limit
-        result, newLPTokenBalance = singleDepositEPrice(
-            sb,
-            ammAccountID,
-            amountBalance,
-            amount,              # amount to deposit
-            lptAMMBalance,
-            ePrice,              # max effective price
-            tfee
-        )
-
-    elif subTxType == tfSingleAsset:
-        # Single asset deposit for calculated LP tokens
-        result, newLPTokenBalance = singleDeposit(
-            sb,
-            ammAccountID,
-            amountBalance,
-            lptAMMBalance,
-            amount,              # amount to deposit
-            lpTokensDeposit,     # optional: min LP tokens expected
-            tfee
-        )
-
-    elif subTxType == tfLPToken:
-        # Proportional deposit for exact LP tokens
-        result, newLPTokenBalance = equalDepositTokens(
-            sb,
-            ammAccountID,
-            amountBalance,
-            amount2Balance,
-            lptAMMBalance,
-            lpTokensDeposit,     # exact LP tokens desired
-            amount,              # optional: min amount1 constraint
-            amount2,             # optional: min amount2 constraint
-            tfee
-        )
-
-    elif subTxType == tfTwoAssetIfEmpty:
-        # Empty pool reinitialization (like AMMCreate)
-        result, newLPTokenBalance = equalDepositInEmptyState(
-            sb,
-            ammAccountID,
-            amount,              # amount1 to deposit
-            amount2,             # amount2 to deposit
-            lptAMMBalance.asset(),
-            tfee
-        )
-
-    else:
-        # Should not happen (validated in preflight)
-        return (tecINTERNAL, False)
-
-    # Update AMM state if deposit succeeded
-    if result == tesSUCCESS:
-        assert newLPTokenBalance > 0
-
-        # Update LP token balance in AMM object
-        ammSle.set(sfLPTokenBalance, newLPTokenBalance)
-
-        # If pool was empty, initialize auction/vote slots
-        if lptAMMBalance == 0:
-            initializeFeeAuctionVote(
-                sb,
-                ammSle,
-                accountID_,
-                lptAMMBalance.asset(),
-                tfee
-            )
-
-        sb.update(ammSle)
-
-    return (result, result == tesSUCCESS)
-
+    pool.lp_token_supply = new_lp_supply
+    if lp_supply == 0:
+        # As in AMMCreate: the depositor gets the auction slot for free and the
+        # only fee vote, and the pool takes the new trading fee
+        pool.initialize_fee_auction_vote(owner=depositor, fee=fee)
 ```
 
 # 3. getTradingFee
 
-The `getTradingFee` function[^get-trading-fee] is called by [`applyGuts`](#2-applyguts) to determine which trading fee rate applies to the depositor before calculating deposit amounts.
-
-It checks if the depositor holds the [auction slot](README.md#121-auction-slot) or is listed in the slot's authorized accounts and if the auction slot has not expired. If so, it returns the discounted fee (1/10th of the regular fee). Otherwise, it returns the AMM's standard trading fee.
+The `getTradingFee` function[^get-trading-fee] is used by the [deposit logic](#2-deposit-logic) to pick the depositor's trading fee. An [auction slot](README.md#121-auction-slot) holder pays a tenth of the regular fee, rounded down. That discount is what they paid for with their [bid](bidding.md). The discount also goes to the accounts the owner authorized. It lasts until the slot expires. Expiry is checked against the close time of the previous ledger, not the wall clock.
 
 [^get-trading-fee]: `getTradingFee`: [`AMMHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/AMMHelpers.cpp#L602-L627)  
 
 ## 3.1. getTradingFee Pseudo-Code
 
 ```python
-def getTradingFee(view, ammSle, account):
-    # Check if auction slot exists
-    if not ammSle.isFieldPresent(sfAuctionSlot):
-        return ammSle[sfTradingFee]
-
-    auctionSlot = ammSle.peekAtField(sfAuctionSlot)
-
-    # Check if auction slot is NOT expired
-    currentTime = view.parentCloseTime()
-    expiration = auctionSlot[~sfExpiration]
-
-    if currentTime < expiration:
-        # Auction slot is active, check if account gets discount
-
-        # Is account the auction slot holder?
-        if auctionSlot[~sfAccount] == account:
-            return auctionSlot[sfDiscountedFee]
-
-        # Is account in the authorized accounts list?
-        if auctionSlot.isFieldPresent(sfAuthAccounts):
-            for authAccount in auctionSlot.getFieldArray(sfAuthAccounts):
-                if authAccount[~sfAccount] == account:
-                    return auctionSlot[sfDiscountedFee]
-
-    # Auction slot expired or account not authorized, return regular fee
-    return ammSle[sfTradingFee]
+def getTradingFee(pool, account):
+    slot = pool.auction_slot
+    if now() < slot.expiration and (account == slot.owner or account in slot.auth_accounts):
+        return slot.discounted_fee
+    return pool.trading_fee
 ```
 
 # 4. Multi-Asset Deposit Modes
@@ -229,7 +102,7 @@ Multi-asset deposit modes maintain proportional deposits by adding both pool ass
 
 The three modes are:
 - [`equalDepositLimit`](#41-equaldepositlimit-tftwoasset) - Specify maximum amounts for both assets, receive proportional LP tokens
-- [`equalDepositTokens`](#42-equaldeposittokens-tflptoken) - Specify exact LP tokens to receive, system calculates required asset amounts
+- [`equalDepositTokens`](#42-equaldeposittokens-tflptoken) - Specify LP tokens to receive, system calculates required asset amounts
 - [`equalDepositInEmptyState`](#43-equaldepositinemptystate-tftwoassetifempty) - Reinitialize an empty pool with new asset amounts and establish a new price ratio
 
 ## 4.1. equalDepositLimit (tfTwoAsset)
@@ -260,94 +133,35 @@ Alice has an AMM with 100 USD and 100 EUR (1:1 ratio). Bob wants to make a propo
 ### 4.1.1. equalDepositLimit Pseudo-Code
 
 ```python
-def equalDepositLimit(
-        view,                 # Ledger view (sandbox)
-        ammAccount,           # AMM pseudo-account ID
-        amountBalance,        # Current pool balance of asset1
-        amount2Balance,       # Current pool balance of asset2
-        lptAMMBalance,        # Total outstanding LP tokens
-        amount,               # User's max amount1 to deposit (from tx[sfAmount])
-        amount2,              # User's max amount2 to deposit (from tx[sfAmount2])
-        lpTokensDepositMin,   # Optional: min LP tokens expected (from tx[sfLPTokenOut])
-        tfee):                # Trading fee (regular or discounted)
-    # STRATEGY 1: Try using all of amount (asset1)
-    frac = amount / amountBalance
+def equalDepositLimit(pool, balance1, balance2, lp_supply, tx, fee):
+    def spend_all_of(amount, balance, other_balance):
+        share = amount / balance
+        lp_tokens = getRoundedLPTokens(lp_supply, share, IsDeposit=True)
+        if lp_tokens == 0:
+            fail(tecAMM_INVALID_TOKENS)
+        share = adjustFracByTokens(lp_supply, lp_tokens, share)  # the share the rounded LP tokens buy
+        return lp_tokens, getRoundedAsset(other_balance, share, IsDeposit=True)
 
-    # Calculate LP tokens for this fraction (with precision adjustment)
-    tokensAdj = getRoundedLPTokens(rules, lptAMMBalance, frac, IsDeposit=True) # helpers.md#211-getroundedlptokens-simple-pseudo-code
+    lp_tokens, amount2 = spend_all_of(tx.Amount, balance1, balance2)
+    if amount2 <= tx.Amount2:
+        return deposit(pool, tx.Amount, amount2, lp_tokens, min_lp_tokens=tx.LPTokenOut)
 
-    if tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, None)
+    lp_tokens, amount1 = spend_all_of(tx.Amount2, balance2, balance1)
+    if amount1 <= tx.Amount:
+        return deposit(pool, amount1, tx.Amount2, lp_tokens, min_lp_tokens=tx.LPTokenOut)
 
-    # Adjust fraction based on rounded tokens (for precision consistency)
-    frac = adjustFracByTokens(rules, lptAMMBalance, tokensAdj, frac)
-
-    # Calculate how much asset2 is needed for this fraction
-    amount2Deposit = getRoundedAsset(rules, amount2Balance, frac, IsDeposit=True) # helpers.md#231-getroundedasset-simple-pseudo-code
-
-    # Check if calculated amount2 fits within user's max constraint
-    if amount2Deposit <= amount2:
-        # Success! Use all of amount, calculated amount2Deposit
-        return deposit(
-            view,
-            ammAccount,
-            amountBalance,
-            amount,              # deposit all of asset1
-            amount2Deposit,      # calculated asset2
-            lptAMMBalance,
-            tokensAdj,
-            None,                # no min constraint on amount
-            None,                # no min constraint on amount2
-            lpTokensDepositMin,  # check LP token minimum
-            tfee
-        )
-
-    # STRATEGY 2: Strategy 1 failed, try using all of amount2
-    frac = amount2 / amount2Balance
-
-    # Calculate LP tokens for this fraction
-    # Using simple version of getRoundedLPTokens (direct fraction)
-    tokensAdj = getRoundedLPTokens(rules, lptAMMBalance, frac, IsDeposit=True) # helpers.md#211-getroundedlptokens-simple-pseudo-code
-
-    if tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, None)
-
-    # Adjust fraction based on rounded tokens
-    frac = adjustFracByTokens(rules, lptAMMBalance, tokensAdj, frac)
-
-    # Calculate how much asset1 is needed for this fraction
-    amountDeposit = getRoundedAsset(rules, amountBalance, frac, IsDeposit=True) # helpers.md#231-getroundedasset-simple-pseudo-code
-
-    # Check if calculated amount fits within user's max constraint
-    if amountDeposit <= amount:
-        # Success! Use calculated amountDeposit, all of amount2
-        return deposit(
-            view,
-            ammAccount,
-            amountBalance,
-            amountDeposit,       # calculated asset1
-            amount2,             # deposit all of asset2
-            lptAMMBalance,
-            tokensAdj,
-            None,                # no min constraint on amount
-            None,                # no min constraint on amount2
-            lpTokensDepositMin,  # check LP token minimum
-            tfee
-        )
-
-    # Both options failed - cannot satisfy constraints
-    return (tecAMM_FAILED, None)
+    fail(tecAMM_FAILED)
 ```
 
 ## 4.2. equalDepositTokens (tfLPToken)
 
-> "I want exactly X LP tokens, what do I need to deposit?"
+> "I want X LP tokens, what do I need to deposit?"
 
-Proportional deposit for exact LP tokens.[^equal-deposit-tokens]
+Proportional deposit for a requested number of LP tokens.[^equal-deposit-tokens]
 
 [^equal-deposit-tokens]: `AMMDeposit::equalDepositTokens`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L637-L679)
 
-This function handles the reverse calculation from [`equalDepositLimit`](#41-equaldepositlimit-tftwoasset): the user specifies the exact number of LP tokens they want to receive, and the function calculates the required proportional amounts of both assets. The user provides `LPTokenOut` (exact LP tokens desired) and optionally `Amount` and `Amount2` as minimum constraints on the deposit amounts. The function first adjusts the requested LP tokens for precision using [`adjustLPTokensOut`](helpers.md#24-adjustlptokensout-deposits), then calculates the pool fraction these tokens represent (`frac = tokensAdj / lptAMMBalance`). Using this fraction, it calculates the required amounts of both assets by multiplying each pool balance by the fraction, rounding up with [`getRoundedAsset`](helpers.md#23-getroundedasset) to ensure the pool receives sufficient assets. If the calculated deposit amounts are less than the optional `Amount` and `Amount2` minimums, the transaction fails with `tecAMM_FAILED`.
+This function handles the reverse calculation from [`equalDepositLimit`](#41-equaldepositlimit-tftwoasset): the user specifies the number of LP tokens they want to receive, and the function calculates the required proportional amounts of both assets. The user provides `LPTokenOut` (LP tokens desired) and optionally `Amount` and `Amount2` as minimum constraints on the deposit amounts. The function first adjusts the requested LP tokens for precision using [`adjustLPTokensOut`](helpers.md#24-adjustlptokensout-deposits), so the user can receive slightly fewer than `LPTokenOut`. It then calculates the pool fraction these tokens represent (`frac = tokensAdj / lptAMMBalance`). Using this fraction, it calculates the required amounts of both assets by multiplying each pool balance by the fraction, rounding up with [`getRoundedAsset`](helpers.md#23-getroundedasset) to ensure the pool receives sufficient assets. If the calculated deposit amounts are less than the optional `Amount` and `Amount2` minimums, the transaction fails with `tecAMM_FAILED`.
 
 **Example:**
 
@@ -363,44 +177,15 @@ Alice created an AMM with 100 USD, 100 EUR, and 100 LP tokens outstanding. Bob w
 ### 4.2.1. equalDepositTokens Pseudo-Code
 
 ```python
-def equalDepositTokens(
-        view,              # Ledger view (sandbox)
-        ammAccount,        # AMM pseudo-account ID
-        amountBalance,     # Current pool balance of asset1
-        amount2Balance,    # Current pool balance of asset2
-        lptAMMBalance,     # Total outstanding LP tokens
-        lpTokensDeposit,   # Exact LP tokens desired (from tx[sfLPTokenOut])
-        depositMin,        # Optional: min amount1 constraint (from tx[sfAmount])
-        deposit2Min,       # Optional: min amount2 constraint (from tx[sfAmount2])
-        tfee):             # Trading fee (not used for proportional deposits)
-    # Adjust LP tokens for precision (with fixAMMv1_3)
-    tokensAdj = adjustLPTokensOut(rules, lptAMMBalance, lpTokensDeposit) # helpers.md#24-adjustlptokensout-deposits
+def equalDepositTokens(pool, balance1, balance2, lp_supply, tx, fee):
+    lp_tokens = adjustLPTokensOut(lp_supply, tx.LPTokenOut)
+    if lp_tokens == 0:
+        fail(tecAMM_INVALID_TOKENS)
 
-    if tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, None)
-
-    # Calculate the fraction of the pool these tokens represent
-    frac = tokensAdj / lptAMMBalance
-
-    # Calculate required deposit amounts for both assets
-    # Both assets must be deposited proportionally to maintain the pool ratio
-    amountDeposit = getRoundedAsset(rules, amountBalance, frac, IsDeposit=True) # helpers.md#231-getroundedasset-simple-pseudo-code
-    amount2Deposit = getRoundedAsset(rules, amount2Balance, frac, IsDeposit=True) # helpers.md#231-getroundedasset-simple-pseudo-code
-
-    # Execute the deposit
-    return deposit(
-        view,
-        ammAccount,
-        amountBalance,
-        amountDeposit,       # calculated: amount1 to deposit
-        amount2Deposit,      # calculated: amount2 to deposit
-        lptAMMBalance,
-        tokensAdj,           # exact: LP tokens to issue
-        depositMin,          # optional: min amount1 expected to deposit
-        deposit2Min,         # optional: min amount2 expected to deposit
-        None,                # no min LP tokens (exact amount specified)
-        tfee
-    )
+    share = lp_tokens / lp_supply
+    amount1 = getRoundedAsset(balance1, share, IsDeposit=True)
+    amount2 = getRoundedAsset(balance2, share, IsDeposit=True)
+    return deposit(pool, amount1, amount2, lp_tokens, min_amount1=tx.Amount, min_amount2=tx.Amount2)
 ```
 
 ## 4.3. equalDepositInEmptyState (tfTwoAssetIfEmpty)
@@ -409,46 +194,14 @@ Reinitialize an empty AMM pool.[^equal-deposit-in-empty-state]
 
 [^equal-deposit-in-empty-state]: `AMMDeposit::equalDepositInEmptyState`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L994-L1014)
 
-This is a special mode that handles the case where all LP tokens have been withdrawn from an AMM, which means both asset balances are also zero (enforced by the [withdrawal system](README.md#13-ammwithdraw)). The depositor specifies both `Amount` and `Amount2` to set a new pool ratio, similar to [`AMMCreate`](README.md#11-ammcreate). The function calculates initial LP tokens using the geometric mean formula (`sqrt(amount * amount2)`), the same formula used when creating a new AMM. The depositor can optionally provide `TradingFee` to set a new fee for the pool. Unlike other deposit modes, there are no minimum constraints since the depositor is establishing the initial terms for the reinitialized pool.
-
-### 4.3.1. equalDepositInEmptyState Pseudo-Code
-
-```python
-def equalDepositInEmptyState(
-        view,              # Ledger view (sandbox)
-        ammAccount,        # AMM pseudo-account ID
-        amount,            # Amount of asset1 to deposit (from tx[sfAmount])
-        amount2,           # Amount of asset2 to deposit (from tx[sfAmount2])
-        lptIssue,          # LP token issue (currency/issuer)
-        tfee):             # Optional: trading fee to set (from tx[sfTradingFee])
-    lpTokens = sqrt(amount * amount2)
-
-    # Execute the deposit with special empty-pool handling
-    # Note the unusual parameters:
-    #   - amountBalance = amount (not the current balance, since pool is empty)
-    #   - lptAMMBalance = 0 (pool is empty, and asset balances are also 0)
-    #   - No minimum constraints (depositor sets the terms)
-    return deposit(
-        view,
-        ammAccount,
-        amount,              # amountBalance: used as reference (pool is empty)
-        amount,              # amountDeposit: actual amount to deposit
-        amount2,             # amount2Deposit: actual amount2 to deposit
-        STAmount(lptIssue, 0),  # lptAMMBalance: 0 (empty pool)
-        lpTokens,            # lpTokensDeposit: initial LP tokens to mint
-        None,                # no min constraint on amount
-        None,                # no min constraint on amount2
-        None,                # no min constraint on LP tokens
-        tfee
-    )
-```
+This mode refills an AMM that has no LP tokens left. The withdrawal that removes the last LP tokens normally deletes the AMM. The AMM stays in the ledger only when it has too many trust lines to delete in one transaction (see [AMMDelete](README.md#36-ammdelete-transaction)). Such an AMM holds no assets, because that withdrawal takes out both full balances. The depositor specifies both `Amount` and `Amount2` to set a new pool ratio, similar to [`AMMCreate`](README.md#31-ammcreate-transaction). The initial LP tokens are the geometric mean `sqrt(Amount * Amount2)`, rounded down, as in AMMCreate. The depositor can optionally provide `TradingFee` to set a new fee for the pool. This mode has no minimum fields, because the depositor sets the pool's terms. The [common deposit function](#6-common-deposit-function) then moves both amounts into the pool and issues the LP tokens.
 
 # 5. Single-Asset Deposit Modes
 
 Single-asset deposits allow users to deposit only one asset instead of both assets proportionally. Unlike [multi-asset deposits](#4-multi-asset-deposit-modes) that maintain the pool ratio, single-asset deposits change the pool composition. Because they alter the pool ratio, [trading fees](#3-gettradingfee) apply to single-asset deposits. There are three modes:
 
 - **[singleDeposit](#51-singledeposit-tfsingleasset) (tfSingleAsset)**: User specifies deposit amount, receives calculated LP tokens
-- **[singleDepositTokens](#52-singledeposittokens-tfoneassetlptoken) (tfOneAssetLPToken)**: User specifies exact LP tokens desired, deposits calculated amount
+- **[singleDepositTokens](#52-singledeposittokens-tfoneassetlptoken) (tfOneAssetLPToken)**: User specifies LP tokens desired, deposits calculated amount
 - **[singleDepositEPrice](#53-singledepositeprice-tflimitlptoken) (tfLimitLPToken)**: User specifies deposit amount and effective price limit
 
 ## 5.1. singleDeposit (tfSingleAsset)
@@ -459,100 +212,48 @@ Deposit a single asset to receive calculated LP tokens.[^single-deposit]
 
 [^single-deposit]: `AMMDeposit::singleDeposit`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L791-L828)
 
-The user specifies `Amount` (the asset to deposit) and the function calculates how many LP tokens they receive. Since this is a single-asset deposit that changes the pool ratio, a [trading fee](#3-gettradingfee) applies. The function uses [`lpTokensOut`](helpers.md#321-lptokensout-equation-3) to calculate the LP tokens based on the deposit amount and trading fee, then adjusts the result for precision with [`adjustLPTokensOut`](helpers.md#24-adjustlptokensout-deposits). The adjusted tokens are passed to [`adjustAssetInByTokens`](helpers.md#26-adjustassetinbytokens) to recalculate the deposit amount, ensuring the reverse calculation doesn't exceed the user's specified amount due to rounding. The optional `LPTokenOut` field provides a minimum constraint - if the calculated LP tokens are less than this value, the transaction fails with `tecAMM_FAILED`.
+The user specifies `Amount` (the asset to deposit) and the function calculates how many LP tokens they receive. Since this is a single-asset deposit that changes the pool ratio, a [trading fee](#3-gettradingfee) applies. The function uses [`lpTokensOut`](helpers.md#321-lptokensout-equation-3) to calculate the LP tokens based on the deposit amount and trading fee, then adjusts the result for precision with [`adjustLPTokensOut`](helpers.md#24-adjustlptokensout-deposits). The adjusted tokens are passed to [`adjustAssetInByTokens`](helpers.md#26-adjustassetinbytokens), which prices them in the deposited asset. If rounding makes them cost more than `Amount`, it issues fewer LP tokens and caps the deposit at `Amount`. The optional `LPTokenOut` field sets a minimum. If fewer LP tokens would be issued, the transaction fails with `tecAMM_FAILED`.
 
 ### 5.1.1. singleDeposit Pseudo-Code
 
 ```python
-def singleDeposit(
-        view,              # Ledger view (sandbox)
-        ammAccount,        # AMM pseudo-account ID
-        amountBalance,     # Current pool balance of the asset
-        lptAMMBalance,     # Total outstanding LP tokens
-        amount,            # User's deposit amount (from tx[sfAmount])
-        lpTokensDepositMin,  # Optional: min LP tokens expected (from tx[sfLPTokenOut])
-        tfee):             # Trading fee (for single-asset deposit)
-    tokens = lpTokensOut(amountBalance, amount, lptAMMBalance, tfee) # helpers.md#321-lptokensout-equation-3
+def singleDeposit(pool, balance1, balance2, lp_supply, tx, fee):
+    lp_tokens = adjustLPTokensOut(lp_supply, lpTokensOut(balance1, tx.Amount, lp_supply, fee))
+    if lp_tokens == 0:
+        fail(tecAMM_INVALID_TOKENS)
 
-    # Adjust tokens for precision (with fixAMMv1_3)
-    tokensAdj = adjustLPTokensOut(rules, lptAMMBalance, tokens) # helpers.md#24-adjustlptokensout-deposits
+    # If rounding makes these LP tokens cost more than Amount, fewer are issued
+    # and the deposit is capped at Amount
+    lp_tokens, amount = adjustAssetInByTokens(balance1, tx.Amount, lp_supply, lp_tokens, fee)
+    if lp_tokens == 0:
+        fail(tecAMM_INVALID_TOKENS)
 
-    if tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, None)
-
-    # Adjust deposit amount based on adjusted tokens
-    tokensAdj, amountDepositAdj = adjustAssetInByTokens(
-        rules, amountBalance, amount, lptAMMBalance, tokensAdj, tfee)
-
-    if tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, None)
-
-    # Execute the deposit
-    # lpTokensDepositMin provides slippage protection
-    return deposit(
-        view,
-        ammAccount,
-        amountBalance,
-        amountDepositAdj,    # adjusted: actual amount to deposit
-        None,                # single-asset deposit (no asset2)
-        lptAMMBalance,
-        tokensAdj,           # calculated: LP tokens to issue
-        None,                # no min constraint on asset amount
-        None,                # no asset2
-        lpTokensDepositMin,  # optional: min LP tokens constraint
-        tfee
-    )
+    return deposit(pool, amount, None, lp_tokens, min_lp_tokens=tx.LPTokenOut)
 ```
 
 ## 5.2. singleDepositTokens (tfOneAssetLPToken)
 
-> "I want exactly X LP tokens, how much do I need to deposit (single asset only)?"
+> "I want X LP tokens, how much do I need to deposit (single asset only)?"
 
-Deposit a single asset to receive exact LP tokens.[^single-deposit-tokens]
+Deposit a single asset to receive a requested number of LP tokens.[^single-deposit-tokens]
 
 [^single-deposit-tokens]: `AMMDeposit::singleDepositTokens`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L838-L866)
 
-This function handles the reverse calculation from [`singleDeposit`](#51-singledeposit-tfsingleasset): the user specifies the exact number of LP tokens they want to receive using `LPTokenOut`, and the function calculates the required deposit amount of a single asset. The user provides `Amount` as a maximum constraint on how much they're willing to deposit. The function first adjusts the requested LP tokens for precision using [`adjustLPTokensOut`](helpers.md#24-adjustlptokensout-deposits), then uses [`ammAssetIn`](helpers.md#322-ammassetin-equation-4) (Equation 4) to calculate the required deposit amount by solving the inverse single-asset deposit problem. If the calculated amount exceeds the user's `Amount` constraint, the transaction fails with `tecAMM_FAILED`.
+This function handles the reverse calculation from [`singleDeposit`](#51-singledeposit-tfsingleasset). The user asks for LP tokens with `LPTokenOut`, and the function calculates how much of a single asset they must deposit. `Amount` is the most the user is willing to deposit. The function first rounds the requested LP tokens down to a value the LP token supply can represent, using [`adjustLPTokensOut`](helpers.md#24-adjustlptokensout-deposits), so the user can receive slightly fewer than `LPTokenOut`. It then uses [`ammAssetIn`](helpers.md#322-ammassetin-equation-4) (Equation 4) to calculate the required deposit, rounded up. If that amount exceeds `Amount`, the transaction fails with `tecAMM_FAILED`.
 
 ### 5.2.1. singleDepositTokens Pseudo-Code
 
 ```python
-def singleDepositTokens(
-        view,              # Ledger view (sandbox)
-        ammAccount,        # AMM pseudo-account ID
-        amountBalance,     # Current pool balance of the asset
-        amount,            # User's max amount willing to pay (from tx[sfAmount])
-        lptAMMBalance,     # Total outstanding LP tokens
-        lpTokensDeposit,   # Exact LP tokens desired (from tx[sfLPTokenOut])
-        tfee):             # Trading fee (for single-asset deposit)
-    # Adjust LP tokens for precision (with fixAMMv1_3)
-    tokensAdj = adjustLPTokensOut(rules, lptAMMBalance, lpTokensDeposit) # helpers.md#24-adjustlptokensout-deposits
+def singleDepositTokens(pool, balance1, balance2, lp_supply, tx, fee):
+    lp_tokens = adjustLPTokensOut(lp_supply, tx.LPTokenOut)
+    if lp_tokens == 0:
+        fail(tecAMM_INVALID_TOKENS)
 
-    if tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, None)
+    amount = ammAssetIn(balance1, lp_supply, lp_tokens, fee)
+    if amount > tx.Amount:
+        fail(tecAMM_FAILED)
 
-    # Calculate how much asset is needed to get these LP tokens
-    amountDeposit = ammAssetIn(amountBalance, lptAMMBalance, tokensAdj, tfee) # helpers.md#322-ammassetin-equation-4
-
-    # Check if calculated deposit exceeds user's maximum
-    if amountDeposit > amount:
-        # User's maximum is too low for desired LP tokens
-        return (tecAMM_FAILED, None)
-
-    # Execute the deposit
-    return deposit(
-        view,
-        ammAccount,
-        amountBalance,
-        amountDeposit,    # calculated: how much asset to deposit
-        None,             # single-asset deposit (no asset2)
-        lptAMMBalance,
-        tokensAdj,        # exact LP tokens to issue
-        None,             # no min constraint on asset
-        None,             # no asset2
-        None,             # no min LP tokens (exact amount specified)
-        tfee
-    )
+    return deposit(pool, amount, None, lp_tokens)
 ```
 
 ## 5.3. singleDepositEPrice (tfLimitLPToken)
@@ -563,11 +264,11 @@ Deposit a single asset with an effective price limit.[^single-deposit-eprice]
 
 [^single-deposit-eprice]: `AMMDeposit::singleDepositEPrice`: [`AMMDeposit.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMDeposit.cpp#L894-L991)
 
-This mode allows users to control the maximum [effective price](README.md#114-effective-price) they're willing to pay per LP token (effective price = asset deposited / LP tokens received). The user provides `EPrice` (maximum effective price) and `Amount` (deposit amount, or zero). 
+This mode lets the user cap the [effective price](README.md#114-effective-price) they pay per LP token: the asset deposited divided by the LP tokens received. The user provides `EPrice`, the maximum effective price, and `Amount`, which can be zero.
 
-There are two scenarios: If `Amount` is non-zero, the function calculates the LP tokens using [`lpTokensOut`](helpers.md#321-lptokensout-equation-3), adjusts for precision, and checks if the resulting effective price is within the limit - if acceptable, the deposit proceeds; otherwise it falls through to scenario 2. 
+If `Amount` is not zero, the function first prices a deposit of all of `Amount`, the same way as [`singleDeposit`](#51-singledeposit-tfsingleasset). If its effective price is within `EPrice`, that deposit goes ahead.
 
-If `Amount` is zero (or the effective price check failed), the function solves a quadratic equation derived from Equation 3 to calculate the optimal deposit amount that achieves exactly the specified effective price. The derivation inverts the single-asset deposit formula to find the deposit amount that results in the target effective price. 
+Otherwise, or when `Amount` is zero, the function finds the deposit whose effective price is exactly `EPrice`. The effective price grows with the size of the deposit, because the deposit moves the pool's price against the depositor. So this is the most the user can deposit within the limit. When `Amount` was given, it should be smaller than `Amount`. The function finds it by substituting `t = b / E` into Equation 3 and solving the resulting quadratic for `b`. Rounding can move the final amounts slightly off `EPrice`.
 
 **Example:**
 
@@ -579,129 +280,49 @@ Alice created an AMM with 100 USD and 100 EUR, 100 LP tokens outstanding (0.3% t
 - Effective price: 100 / 41.36 = ~2.42 USD per LP token
 - Result: 2.42 < 2.5, so the deposit proceeds (100 USD for 41.36 LP tokens)
 
-**Scenario 2: Bob specifies only effective price**
-- Bob provides: Amount = 0, EPrice = 2.5 USD per LP token
-- System calculates: Solves quadratic to find optimal deposit for exactly 2.5 USD/LP
-- Result: System calculates the exact deposit amount that yields 2.5 USD per LP token
+**Scenario 2: Bob's amount is above the price limit**
+- Bob provides: Amount = 200 USD, EPrice = 2.5 USD per LP token
+- 200 USD would yield ~73.10 LP tokens, an effective price of ~2.74, which is above the limit
+- The system solves for the deposit at 2.5: Bob deposits ~123.88 USD and receives ~49.55 LP tokens
+- With Amount = 0, Bob gets the same result
 
 ### 5.3.1. singleDepositEPrice Pseudo-Code
 
 ```python
-def singleDepositEPrice(
-        view,              # Ledger view (sandbox)
-        ammAccount,        # AMM pseudo-account ID
-        amountBalance,     # Current pool balance of the asset
-        amount,            # User's deposit amount (from tx[sfAmount], can be 0)
-        lptAMMBalance,     # Total outstanding LP tokens
-        effectivePrice,    # Max effective price (from tx[sfEPrice])
-        tfee):             # Trading fee (for single-asset deposit)
-    # SCENARIO 1: User provided a specific deposit amount
-    # Check if the effective price for this deposit is acceptable
-    if amount != 0:
-        # Calculate LP tokens we'd get for this deposit
-        # lpTokensOut uses Equation 3 (single-asset deposit formula)
-        tokens = lpTokensOut(amountBalance, amount, lptAMMBalance, tfee) # helpers.md#321-lptokensout-equation-3
-        tokens = adjustLPTokensOut(rules, lptAMMBalance, tokens) # helpers.md#24-adjustlptokensout-deposits
+def singleDepositEPrice(pool, balance1, balance2, lp_supply, tx, fee):
+    if tx.Amount != 0:
+        lp_tokens = adjustLPTokensOut(lp_supply, lpTokensOut(balance1, tx.Amount, lp_supply, fee))
+        if lp_tokens <= 0:
+            fail(tecAMM_INVALID_TOKENS)
+        lp_tokens, amount = adjustAssetInByTokens(balance1, tx.Amount, lp_supply, lp_tokens, fee)
+        if lp_tokens == 0:
+            fail(tecAMM_INVALID_TOKENS)
+        if amount / lp_tokens <= tx.EPrice:
+            return deposit(pool, amount, None, lp_tokens)
 
-        if tokens <= 0:
-            return (tecAMM_INVALID_TOKENS, None)
+    amount = round_up(balance1 * deposit_ratio_at_price(balance1, lp_supply, tx.EPrice, fee))
+    if amount <= 0:
+        fail(tecAMM_FAILED)
 
-        # Adjust the deposit amount if rounding caused issues
-        # This ensures we don't try to deposit more than the user's maximum
-        tokensAdj, amountDepositAdj = adjustAssetInByTokens(
-            rules, amountBalance, amount, lptAMMBalance, tokens, tfee) # helpers.md#26-adjustassetinbytokens
+    lp_tokens = adjustLPTokensOut(lp_supply, round_down(amount / tx.EPrice))
+    lp_tokens, amount = adjustAssetInByTokens(balance1, amount, lp_supply, lp_tokens, fee)
+    if lp_tokens == 0:
+        fail(tecAMM_INVALID_TOKENS)
 
-        if tokensAdj == 0:
-            return (tecAMM_INVALID_TOKENS, None)
+    return deposit(pool, amount, None, lp_tokens)
+```
 
-        # Calculate the actual effective price
-        # effectivePriceActual = asset deposited / LP tokens received
-        # Example: 1,000 XRP / 95 LP tokens = 10.526 XRP per LP token
-        effectivePriceActual = amountDepositAdj / tokensAdj
+`deposit_ratio_at_price` solves the quadratic, with `B` the pool balance, `T` the LP token supply and `E` the effective price:
 
-        # Check if the effective price is within user's limit
-        if effectivePriceActual <= effectivePrice:
-            # Good price! Proceed with deposit
-            return deposit(
-                view,
-                ammAccount,
-                amountBalance,
-                amountDepositAdj,
-                None,             # single-asset deposit
-                lptAMMBalance,
-                tokensAdj,
-                None, None, None, # no min constraints
-                tfee
-            )
-        # else: Price too high, fall through to scenario 2
+```
+f1 = 1 - fee
+f2 = (1 - fee/2) / f1
+c  = f1 * B / (E * T)
+d  = f1 + c*f2 - c
 
-    # SCENARIO 2: User didn't provide amount OR price was too high
-    # Calculate the optimal deposit for the given effective price limit
-    #
-    # We need to solve for the deposit amount that gives exactly the effective price.
-    # Given: effectivePrice (E), find: assetDeposit (b) and lpTokens (t)
-    # Such that: E = b / t
-    #
-    # Fee multipliers (same as ammAssetIn)
-    feeMult = 1 - (tfee / 100000)
-    feeMultHalf = (1 - (tfee / 200000)) / feeMult
+c^2 * R^2 + (c^2*f2^2 + 2c - d^2) * R + (2c*f2^2 + 1 - 2d*f2) = 0
 
-    # Calculate intermediate values for the quadratic equation
-    c = feeMult * amountBalance / (effectivePrice * lptAMMBalance)
-    d = feeMult + c * feeMultHalf - c
-
-    # Set up quadratic equation: a1*R^2 + b1*R + c1 = 0
-    # Where R is the deposit ratio (see derivation in code)
-    quadraticA = c * c
-    quadraticB = (c * c * feeMultHalf * feeMultHalf) + (2 * c) - (d * d)
-    quadraticC = (2 * c * feeMultHalf * feeMultHalf) + 1 - (2 * d * feeMultHalf)
-
-    # Solve for R using quadratic formula: (-b + sqrt(b^2 - 4ac)) / (2a)
-    discriminant = quadraticB * quadraticB - 4 * quadraticA * quadraticC
-    R = (-quadraticB + sqrt(discriminant)) / (2 * quadraticA)
-
-    # Apply rounding (upward for deposits with fixAMMv1_3)
-    # Using callback version of getRoundedAsset for delayed evaluation
-    assetDeposit = [getRoundedAsset](helpers.md#232-getroundedasset-callback-pseudo-code)(
-        rules,
-        lambda: feeMult * amountBalance * R,  # noRoundCb
-        amountBalance,                         # balance
-        lambda: feeMult * R,                   # productCb
-        IsDeposit=True
-    )
-
-    if assetDeposit <= 0:
-        return (tecAMM_FAILED, None)
-
-    # Calculate LP tokens from the deposit and effective price
-    # Using callback version of getRoundedLPTokens for delayed evaluation
-    lpTokensCalculated = [getRoundedLPTokens](helpers.md#212-getroundedlptokens-callback-pseudo-code)(
-        rules,
-        lambda: assetDeposit / effectivePrice,  # noRoundCb
-        lptAMMBalance,                           # lptAMMBalance
-        lambda: assetDeposit / effectivePrice,   # productCb
-        IsDeposit=True
-    )
-
-    # Adjust for rounding issues (same as scenario 1)
-    tokensAdj, amountDepositAdj = [adjustAssetInByTokens](helpers.md#26-adjustassetinbytokens)(
-        rules, amountBalance, assetDeposit, lptAMMBalance, lpTokensCalculated, tfee)
-
-    if tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, None)
-
-    # Execute the deposit
-    return deposit(
-        view,
-        ammAccount,
-        amountBalance,
-        amountDepositAdj,
-        None,             # single-asset deposit
-        lptAMMBalance,
-        tokensAdj,
-        None, None, None, # no min constraints
-        tfee
-    )
+deposit_ratio_at_price = f1 * R, where R is the positive root
 ```
 
 # 6. Common Deposit Function
@@ -713,88 +334,21 @@ The `deposit()` function[^deposit] is called by all deposit modes to perform the
 ## 6.1. deposit Pseudo-Code
 
 ```python
-def deposit(
-        view,              # Ledger view (sandbox)
-        ammAccount,        # AMM pseudo-account ID
-        amountBalance,     # Current pool balance of asset1
-        amountDeposit,     # Calculated amount1 to deposit
-        amount2Deposit,    # Optional: calculated amount2 to deposit
-        lptAMMBalance,     # Total outstanding LP tokens
-        lpTokensDeposit,   # LP tokens to issue
-        depositMin,        # Optional: min amount1 constraint
-        deposit2Min,       # Optional: min amount2 constraint
-        lpTokensDepositMin,  # Optional: min LP tokens constraint
-        tfee):             # Trading fee
-    # Adjust amounts for precision. With fixAMMv1_3 this should not change the values, because all rounding and precision calculations have been done already
-    amountDepositActual, amount2DepositActual, lpTokensDepositActual = \
-        adjustAmountsByLPTokens(
-            amountBalance,
-            amountDeposit,
-            amount2Deposit,
-            lptAMMBalance,
-            lpTokensDeposit,
-            tfee,
-            isDeposit=True
-        )
+def deposit(pool, amount1, amount2, lp_tokens, min_amount1=0, min_amount2=0, min_lp_tokens=0):
+    if (amount1 < min_amount1 or lp_tokens < min_lp_tokens
+            or (amount2 is not None and amount2 < min_amount2)):
+        fail(tecAMM_FAILED)
 
-    # Validate adjusted LP tokens
-    if lpTokensDepositActual <= 0:
-        return (tecAMM_INVALID_TOKENS, None)
+    for amount in [amount1, amount2]:
+        if amount is None:  # single-asset deposit
+            continue
+        if amount <= 0:
+            fail(temBAD_AMOUNT)
+        # For XRP, the balance above the reserve, counting a new LP token trust line if one is needed
+        if spendable(depositor, amount.asset) < amount:
+            fail(tecUNFUNDED_AMM)
+        send(amount, from_=depositor, to=pool.account, transfer_fee=False)
 
-    # Check minimum constraints (slippage protection)
-    if amountDepositActual < depositMin or \
-       amount2DepositActual < deposit2Min or \
-       lpTokensDepositActual < lpTokensDepositMin:
-        return (tecAMM_FAILED, None)
-
-    # Check balance for asset1 deposit
-    # checkBalance returns error code (TER) if deposit would fail, tesSUCCESS otherwise
-    # For XRP: checks liquid balance (accounting for reserve and potential LP token trustline creation)
-    # For other assets: checks if amount <= 0, or if account holds sufficient amount (or is the issuer)
-    ter = checkBalance(amountDepositActual)
-    if ter != tesSUCCESS:
-        return (ter, None)  # returns temBAD_AMOUNT if <= 0, tecUNFUNDED_AMM if insufficient
-
-    # Transfer asset1 from depositor to AMM
-    result = accountSend(
-        view,
-        account,              # from: depositor
-        ammAccount,           # to: AMM pseudo-account
-        amountDepositActual,  # amount
-        WaiveTransferFee=Yes, # AMM deposits don't pay transfer fees
-        AllowMPTOverflow=No   # Prevent MPT OutstandingAmount from exceeding MaximumAmount
-    )
-    if result != tesSUCCESS:
-        return (result, None)
-
-    # If two-asset deposit, check balance and transfer asset2
-    if amount2DepositActual:
-        ter = checkBalance(amount2DepositActual)
-        if ter != tesSUCCESS:
-            return (ter, None)
-
-        result = accountSend(
-            view,
-            account,
-            ammAccount,
-            amount2DepositActual,
-            WaiveTransferFee=Yes,
-            AllowMPTOverflow=No
-        )
-        if result != tesSUCCESS:
-            return (result, None)
-
-    # Transfer LP tokens from AMM to depositor
-    #    This creates a trust line if depositor doesn't have one
-    result = accountSend(
-        view,
-        ammAccount,            # from: AMM pseudo-account
-        account,               # to: depositor
-        lpTokensDepositActual  # amount
-    )
-    if result != tesSUCCESS:
-        return (result, None)
-
-    # Return new total LP token balance
-    return (tesSUCCESS, lptAMMBalance + lpTokensDepositActual)
+    send(lp_tokens, from_=pool.account, to=depositor)
+    return pool.lp_token_supply + lp_tokens
 ```

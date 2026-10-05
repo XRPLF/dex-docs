@@ -407,45 +407,38 @@ xrpld --unittest=AMMCalc --unittest-arg "swapout,A(USD(1000),EUR(10000)),EUR(500
 
 Calculate an AMM offer size such that after the swap, the pool's reserve ratio equals a target quality (typically the best CLOB offer quality).[^change-spot-price-quality]
 
-[^change-spot-price-quality]: `changeSpotPriceQuality`: [`AMMHelpers.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/ledger/helpers/AMMHelpers.h#L302-L399)
+[^change-spot-price-quality]: `changeSpotPriceQuality`: [`AMMHelpers.h`](https://github.com/XRPLF/rippled/blob/3.4.0/include/xrpl/ledger/helpers/AMMHelpers.h#L328-L435)
 
 This function is called from `AMMLiquidity::getOffer()` during single-path pathfinding when integrating AMM and CLOB (Central Limit Order Book) liquidity.[^amm-liquidity-get-offer] When a CLOB quality is available for comparison, this function sizes the AMM offer so that consuming it would move the AMM's spot price to match the best CLOB offer quality.
 
-[^amm-liquidity-get-offer]: AMMLiquidity getOffer usage: [`AMMLiquidity.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/AMMLiquidity.cpp#L211-L212)
+[^amm-liquidity-get-offer]: AMMLiquidity getOffer usage: [`AMMLiquidity.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/paths/AMMLiquidity.cpp#L202-L203)
 
-When one side of the pool is XRP, the algorithm calculates the XRP side first (whether that's takerGets or takerPays), then derives the other side from it. This differs from IOU-only or MPT pools where takerPays is calculated first. 
+The algorithm calculates one side of the offer first and derives the other side from it. When that first side is integral (XRP or an MPT), it is rounded down, which can only improve the offer's quality. An integral asset's minimum unit can be significant for a small offer. If such a side were derived second, its rounding could leave the offer below the target quality, and the offer might fail to generate. So the algorithm calculates the economically coarser integral side first. It starts with takerGets when the output asset is integral and either the input asset is fractional (an IOU), or both assets are integral and one output unit costs at least one input unit at the target quality. Otherwise it starts with takerPays. Before 3.4.0, only an XRP output started with takerGets. XRP/IOU and IOU-only pools behave the same as before. Pools with an MPT, including XRP/MPT pools, now follow the rule above.
 
 
 #### 3.1.4.1. changeSpotPriceQuality Pseudo-Code
 
 ```python
-def changeSpotPriceQuality(
-        pool,           # TAmounts<TIn, TOut> with pool.in and pool.out balances
-        quality,        # Target quality (typically best CLOB offer quality)
-        tfee,           # Trading fee in units of 1/100,000
-        rules):         # Ledger rules (for amendment checks)
-    """
-    This pseudocode assumes fixAMMv1_1 is enabled
-    """
-
-    if isXRP(getAsset(pool.out)):
-        # TakerGets is XRP - calculate it first
+def changeSpotPriceQuality(pool, quality, tfee):
+    # quality.rate() is input units per output unit, so one output unit is
+    # coarser when it costs at least one input unit
+    if getAsset(pool.out).integral() and (
+            not getAsset(pool.in).integral() or quality.rate() >= 1):
         amounts = getAMMOfferStartWithTakerGets(pool, quality, tfee)
     else:
-        # TakerPays is XRP (or both are IOUs) - calculate takerPays first
         amounts = getAMMOfferStartWithTakerPays(pool, quality, tfee)
 
-    # Even after sizing, the resulting offer may still be worse than the target.
-    if not amounts or Quality(amounts) < quality:
+    # Even after sizing, the resulting offer may still be worse than the target
+    if amounts is None or Quality(amounts) < quality:
         return None
     return amounts
 ```
 
 #### 3.1.4.2. getAMMOfferStartWithTakerGets
 
-Calculate AMM offer starting with takerGets (output) when takerGets is XRP.[^get-amm-offer-start-with-taker-gets]
+Calculate AMM offer starting with takerGets (output), when changeSpotPriceQuality chooses that side.[^get-amm-offer-start-with-taker-gets]
 
-[^get-amm-offer-start-with-taker-gets]: `getAMMOfferStartWithTakerGets`: [`AMMHelpers.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/ledger/helpers/AMMHelpers.h#L175-L215)
+[^get-amm-offer-start-with-taker-gets]: `getAMMOfferStartWithTakerGets`: [`AMMHelpers.h`](https://github.com/XRPLF/rippled/blob/3.4.0/include/xrpl/ledger/helpers/AMMHelpers.h#L199-L241)
 
 **Two scenarios considered:**
 
@@ -492,7 +485,7 @@ def getAMMOfferStartWithTakerGets(pool, targetQuality, tfee):
     takerGets = min(takerGetsA, takerGetsB)
 
     # Round takerGets downward (minimizes offer, maximizes quality)
-    # This has most impact when takerGets is XRP
+    # This has most impact when takerGets is integral
     takerGets = toAmount(getAsset(pool.out), takerGets, roundingMode=downward)
 
     # Calculate takerPays using swapAssetOut
@@ -548,8 +541,8 @@ Similar to `getAMMOfferStartWithTakerGets`, but solves for takerPays (i) instead
 ```python
 def getAMMOfferStartWithTakerPays(pool, targetQuality, tfee):
     """
-    Generate AMM offer starting with takerPays when pool.in is XRP
-    (or both assets are IOUs).
+    Generate AMM offer starting with takerPays, when changeSpotPriceQuality
+    chooses that side.
 
     Solves two scenarios and selects smallest takerPays to maximize quality.
     """
@@ -580,7 +573,7 @@ def getAMMOfferStartWithTakerPays(pool, targetQuality, tfee):
     takerPays = min(takerPaysA, takerPaysB)
 
     # Round takerPays downward (minimizes offer, maximizes quality)
-    # This has most impact when takerPays is XRP
+    # This has most impact when takerPays is integral
     takerPays = toAmount(getAsset(pool.in), takerPays, roundingMode=downward)
 
     # Calculate takerGets using swapAssetIn

@@ -391,7 +391,7 @@ The `flow` function orchestrates payment execution by converting paths into stra
 ```python
 # Engine state, shared across flow -> strandsFlow -> strandFlow
 sb:         PaymentSandbox     # working ledger view; writes are buffered and committed only if the payment succeeds
-deliver:    Amount            # amount + asset the destination must receive
+deliver:    Amount            # requested amount + asset for the destination (an upper bound for tfSell crossing)
 sendMax:    Optional[Amount]  # cap on what the source will spend (may be absent)
 ammContext: AMMContext        # AMM bookkeeping: single/multi-path flag + 30-iteration cap
 strands:    list[Strand]      # executable routes built from the input paths
@@ -452,7 +452,7 @@ This flag determines which of the two AMM offer sizing strategies is used. See [
 
 [^multipath-reset]: `strandsFlow` re-sets multiPath each iteration from the active-strand count: [`StrandFlow.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/paths/detail/StrandFlow.h#L640)
 
-AMM offers can be consumed in at most 30 iterations (`kMaxIterations = 30`). The `ammIters_` counter increments each time an AMM offer is consumed. Once `ammIters_ >= 30`, `maxItersReached()` returns true and no more AMM offers are generated.
+AMM offers can be consumed in at most 30 iterations (`kMaxIterations = 30`). The `ammIters_` counter increments once for each liquidity pass whose chosen strand consumed an AMM offer. Once `ammIters_ >= 30`, `maxItersReached()` returns true and no more AMM offers are generated.
 
 ## 3.3. Domain Payments
 
@@ -460,12 +460,12 @@ When a payment or offer crossing includes a `domainID` parameter, the Flow engin
 - A Payment transaction specifies the `DomainID` field
 - An OfferCreate transaction specifies the `DomainID` field and crosses existing offers
 
-**Access Verification**: Before the Flow engine executes, domain access is verified during transaction preclaim. For Payment transactions, both the sender (Account) and receiver (Destination) must be "in domain"[^domain-access-payment] - either the domain owner or hold a valid accepted credential that matches one of the domain's AcceptedCredentials entries. For OfferCreate transactions, the offer creator needs to be in domain.[^domain-access-offer] If verification fails, the transaction fails with `tecNO_PERMISSION` before Flow begins execution.
+**Access Verification**: Before the Flow engine executes, domain access is verified in preclaim and again at the start of doApply. For Payment transactions, both the sender (Account) and receiver (Destination) must be "in domain"[^domain-access-payment] - either the domain owner or hold a valid accepted credential that matches one of the domain's AcceptedCredentials entries. For OfferCreate transactions, the offer creator needs to be in domain.[^domain-access-offer] If verification fails, the transaction fails with `tecNO_PERMISSION` before Flow begins execution. An account that has no accepted, unexpired matching credential but has an expired one fails with `tecEXPIRED` instead, and its expired matching credentials are deleted (see [Credential Verification](../permissioned_domains/README.md#42-credential-verification)).
 
-[^domain-access-payment]: Payment domain access verification: [`Payment.cpp:392-399`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L392-L399)
-[^domain-access-offer]: OfferCreate domain access verification: [`OfferCreate.cpp:241-245`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L241-L245)
+[^domain-access-payment]: Payment domain access verification: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L478-L515), [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L523-L546)
+[^domain-access-offer]: OfferCreate domain access verification: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L243-L270), [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L1026-L1045)
 
-Domain membership is verified using the `accountInDomain()` function, which:
+Domain membership follows these rules:
 1. Checks if the account is the domain owner (immediate access)
 2. Otherwise, iterates through the domain's AcceptedCredentials array (max 10 entries) looking for a matching credential where:
    - Subject = account
@@ -508,7 +508,7 @@ This is a planning phase of a payment, so `toStrands` does not care about the de
 
 `toStrands` creates strand for the default path (unless a flag that prevents it was added) and user-provided paths. If the strand is malformed, which amounts to unexpected behavior, toStrands immediately returns.
 If the strand fails for a legitimate reason, for example if it is dry (no liquidity), it is simply skipped and the next path is evaluated.
-Otherwise, the strand is added to a collection storing strands.
+Otherwise, the strand is added to a collection storing strands, unless an identical strand is already there.
 
 If there are any valid strands, they are returned. If there are no valid strands, the function returns the reason why the last strand has failed. 
 
@@ -537,7 +537,7 @@ sequenceDiagram
         toStrands->>toStrand: Convert path to strand
         toStrand-->>toStrands: Return result
         alt result.ter == tesSUCCESS
-            toStrands->>Strands: Add strand
+            toStrands->>Strands: Add strand (skip if identical one exists)
         else isMalformedTer(result.ter)
             toStrands-->>Caller: Return error immediately
         else isAnotherError(result.ter)
@@ -647,7 +647,7 @@ Here are some example normalization scenarios:
 |--------------|--------------------------------------|----------------------------------------------------------------------------------------------------------------------|
 | Issuing IOU  | `[]`                                 | `[Issuer (0x31, currency set to IOU and issuer to self), Alice (0x01)]`                                              |
 | IOU to IOU   | `[]`                                 | `[Alice (0x31, with currency set to IOU and issuer to self), Issuer (0x01), Bob (0x01)]`                             |
-| XRP to Token | `[XRP/USD offer]`                    | `[Alice (0x31, with issuer set to 0 and currency to XRP), XRP/USD order book (0x30), USD Issuer (0x01), Bob (0x01)]` |
+| XRP to Token | `[XRP/USD offer]`                    | `[Alice (0x31, with issuer set to 0 and currency to XRP), XRP account 0 (0x01), XRP/USD order book (0x30), USD Issuer (0x01), Bob (0x01)]` |
 | IOU to XRP   | `[USD/XRP offer]`                    | `[Alice (0x31), USD Issuer, USD/XRP offer (0x30), XRP (0x01, account 0), Bob (0x01)]`                                |
 | IOU to MPT   | `[USD/MPT offer]`                    | `[Alice (0x31), USD Issuer, USD/MPT offer (0x60), MPT issuer (0x01), Bob (0x01)]`                                    |
 | Issuing MPT  | `[]`                                 | `[Issuer (0x61), Alice (0x01)]`                                                                                      |
@@ -717,7 +717,7 @@ The issuer appears twice but in different roles. Note that `MPTEndpointStep` key
 
 This is valid because the issuer acts as an intermediary, receiving tokens in one step and sending them in another. The two indices prevent invalid loops (issuer as source twice, or destination twice) while allowing valid intermediary routing.
 
-**`seenBookOuts`**: A single asset set tracking output assets from order book conversions (BookStep). Each BookStep records its output asset to ensure the same order book doesn't appear multiple times in a strand.
+**`seenBookOuts`**: A single asset set tracking output assets from order book conversions (BookStep). Each BookStep records its output asset, so no two BookSteps in a strand can output the same asset.
 
 When a step's `check()` method validates, it verifies its asset hasn't been seen before in the appropriate context. If the asset was already present (`.insert().second` returns false), validation fails with `temBAD_PATH_LOOP`.
 
@@ -887,7 +887,12 @@ result:   list[Step]          # the strand being built
 # loop-guard sets (seenDirectAssets, seenBookOuts) travel in StrandContext (see 5.2.1)
 
 def toStrand():
+    # Null or inconsistent src, dst, deliver or sendMax asset
+    if invalid_payment_parameters():
+        return temBAD_PATH
+
     validate_path_elements()          # reject malformed elements early, returns temBAD_PATH
+
     normPath = normalize(path)        # add implied source, destination, issuer hops (5.1)
 
     # Asset leaving the source. It is sendMax's asset if given, otherwise the
@@ -895,18 +900,19 @@ def toStrand():
     curAsset = starting_asset()
 
     # Walk adjacent element pairs. A step is built for `next`, so when `cur` is an
-    # offer and `next` is an account the offer's step already exists and is skipped.
+    # offer and `next` is an account the offer's step already exists.
     for cur, next in adjacent_pairs(normPath):
         curAsset = advance_asset(curAsset, cur)
 
         if cur.is_offer() and next.is_account():
-            # The offer already produced its step. The only case left is an offer
-            # paying out to a non-issuer account (the closing hop). Add a closing
-            # DirectStepI, or an XRPEndpointStep when the asset is XRP.
-            add_closing_step_if_needed(curAsset, next)
+            # The offer pays out to a non-issuer account. For an IOU, add a DirectStepI
+            # from the issuer. XRP can only leave through an XRPEndpointStep on the last
+            # pair, so anywhere else it returns temBAD_PATH.
+            add_implied_step_if_needed(curAsset, next)
             continue
 
-        result.append(toStep(cur, next, curAsset))   # build the step for this pair (5.3.2)
+        # toStep returns the failure code of the step it could not build (5.3.2)
+        result.append(toStep(cur, next, curAsset))
 
     check_strand(result)              # sanity-check connectivity and final asset
     return result
@@ -939,7 +945,7 @@ def advance_asset(curAsset, cur):
 # it picks and builds the right Step subclass.
 def toStep(e1, e2, curAsset):
     # XRP at a strand endpoint becomes an XRPEndpointStep (source or destination).
-    if is_first and e1 is an XRP account:
+    if is_first and e1 is an account carrying the XRP currency:
         return XRPEndpointStep(source = e1)
     if is_last and e1 is an XRP account and e2 is an account:
         return XRPEndpointStep(dest = e2)
@@ -1164,20 +1170,27 @@ remainingOut:  Amount             # how much is still to be delivered
 remainingIn:   Optional[Amount]   # how much the source may still spend (from sendMax)
 activeStrands: list[Strand]       # strands still worth trying, re-ranked each pass
 savedIns, savedOuts: list[Amount] # per-pass amounts, summed smallest-first for precision
+passes:        int                # liquidity passes so far
+offersConsidered: int             # CLOB offers reported by each strand evaluation, failed ones included
 
 def strandsFlow():
     sb = PaymentSandbox(baseView)
     remainingOut = outReq
     remainingIn = sendMax                 # None when no sendMax was given
+    passes = 0
+    offersConsidered = 0
 
     # Each pass consumes liquidity from the single best strand. Loop until the
     # output is delivered, the sendMax is spent, or no strand can deliver more.
     while remainingOut > 0 and (remainingIn is None or remainingIn > 0):
+        passes += 1
         if passes >= 1000:                # safety cap
             return telFAILED_PROCESSING
 
-        # Better quality strands will be first
-        activeStrands = rank_by_quality(activeStrands, limitQuality)
+        # Better quality strands will be first. A single strand is not ranked or filtered.
+        if len(activeStrands) > 1:
+            activeStrands = rank_by_quality(activeStrands, limitQuality)
+
         ammContext.multiPath = (len(activeStrands) > 1)
 
         # AMM optimization: When only one strand with limitQuality exists, calculate the maximum
@@ -1193,22 +1206,30 @@ def strandsFlow():
         for strand in activeStrands:
             # Clear AMM liquidity flag before evaluating each strand
             ammContext.clear()
+
             # If we are crossing offers, and limitQuality is defined, there is no leeway given.
-            # Do not consider any strand that has a lower quality.
-            if offerCrossing and limitQuality and qualityUpperBound(strand) < limitQuality:
-                continue
+            # Do not consider any strand that has a lower quality, or no quality estimate.
+            if offerCrossing and limitQuality:
+                bound = qualityUpperBound(strand)
+                if bound is None or bound < limitQuality:
+                    continue
+
             f = strandFlow(strand, remainingIn, target_out)   # evaluate one strand (section 7)
             record_dead_offers(f)
+            offersConsidered += f.offersUsed
+
             if not f.success or f.out == 0:
                 continue                  # strand is dry or failed
+
             # Reject the path if quality is below the limit quality. If we did reduce remaining
             # out, we give quality some slack.
             if limitQuality and quality(f) < limitQuality and not amm_slack(f):
                 continue
+
             best = f
-            # The strand still has liquidity available, so we add it to strands to still consider
-            # in another iteration
-            if f still has liquidity:
+
+            # A strand with a BookStep that hit its offer limit is not tried again
+            if not f.inactive:
                 requeue(strand)
             requeue(strands after this one)
             break
@@ -1219,10 +1240,11 @@ def strandsFlow():
             savedOuts.add(best.out); savedIns.add(best.in)
             remainingOut = outReq - sum(savedOuts)
             remainingIn = sendMax - sum(savedIns)     # when sendMax is set
+
         remove_dead_offers(sb)
 
         # Break out of while (outer) loop if we did not find a good strand or we used too many offers
-        if best is None or offers_considered >= 1500:
+        if best is None or offersConsidered >= 1500:
             break
 
     # Sum amounts from smallest to largest for better precision (avoids rounding errors)
@@ -1232,11 +1254,11 @@ def strandsFlow():
 
 
 # finalize_result picks the return code from how much was delivered:
-#   delivered == requested                        -> success (commit sb)
 #   delivered  > requested                        -> tefEXCEPTION (rounding sanity check)
-#   delivered  < requested and not partialPayment -> tecPATH_PARTIAL
+#   delivered  < requested and not partialPayment -> tecPATH_PARTIAL, except for tfSell crossing
 #   delivered == 0 and partialPayment             -> tecPATH_DRY
-# Sell-mode offer crossing adds a fill-or-kill check on leftover sendMax (omitted here).
+#   tfSell crossing without partialPayment        -> tecPATH_PARTIAL if any sendMax is left
+#   otherwise                                     -> success (commit sb)
 ```
 
 ## 6.2. qualityUpperBound
@@ -1273,7 +1295,7 @@ There is no guarantee that this quality will actually be achieved. For example, 
 
 ## 6.3. limitOut
 
-The [`limitOut`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/tx/paths/detail/StrandFlow.h#L355-L414) function calculates the maximum output amount for a strand containing AMM liquidity that maintains a specified quality threshold. This is an AMM-specific optimization applied only when:[^limitout-call]
+The [`limitOut`](https://github.com/XRPLF/rippled/blob/3.4.0/include/xrpl/tx/paths/detail/StrandFlow.h#L377-L444) function calculates the maximum output amount for a strand containing AMM liquidity that maintains a specified quality threshold. This is an AMM-specific optimization applied only when:[^limitout-call]
 - There is a single strand available
 - A `limitQuality` threshold is specified
 - The strand contains at least one AMM step (a `BookStep` with AMM liquidity)
@@ -1290,7 +1312,7 @@ The function will loop over steps in strands and get the quality function for ea
 
 All quality functions are combined and a composed quality function is created which will not be constant if at least one quality within it is not constant.[^isconst]
 
-If the composite quality function is constant (all steps have fixed quality), then the strand's quality won't change regardless of the amount consumed. In this case, `limitOut` returns the original `remainingOut` unchanged since the optimization doesn't apply. The strand will either meet the quality threshold for the full amount or fail entirely.
+If the composite quality function is constant (all steps have fixed quality), then the strand's quality won't change regardless of the amount consumed. In this case, `limitOut` returns the original `remainingOut` unchanged since the optimization doesn't apply.
 
 When the composite quality function is non-constant (contains at least one AMM step), `limitOut` uses [`qualityFunction.outFromAvgQ(limitQuality)`][outfromavgq] to mathematically solve for the maximum output amount where the average quality equals `limitQuality`.
 
@@ -1307,6 +1329,8 @@ Quality functions represent average quality as a linear function of output: `q(o
 When multiple steps are combined, their quality functions are composed to create a strand-level quality function.
 
 The `outFromAvgQ` function inverts this relationship to solve for output: `out = (1/quality.rate() - b) / m`.
+
+For XRP and MPT outputs, the result is rounded to a whole unit. Under the MPTokensV2 amendment, when that rounding lands above the solved amount and the rounded output no longer meets `limitQuality`, the output is rounded down instead. The default rounding is kept whenever it still meets the limit, because it is the larger amount that matches.
 
 A special case is handled when there is no positive `out` for the desired `limitQuality`, when `outFromAvgQ` returns a null result to indicate this is the case.
 
@@ -1470,7 +1494,7 @@ flowchart LR
 ```
 
 Since we know we require 10 EUR for the last step, we call BookStep's `rev` method with 10 EUR as desired output.
-The BookStep **can only provide 8 EUR** as the output, and it is asking for 12 USD.
+The BookStep **can only provide 8 EUR** as the output. Its offers need 12 USD for that, and the USD issuer charges a transfer fee, so the step asks for 14 USD.
 
 ```mermaid
 flowchart LR
@@ -1479,7 +1503,7 @@ flowchart LR
     issuerToOfferToIssuer{{BookStep<br>rev: 10 EUR out}}
     issuerToBob{{DirectStepI}}
     bob((Bob))
-    alice --> aliceToIssuer -- 12 USD --> issuerToOfferToIssuer -- 8 EUR --> issuerToBob --> bob
+    alice --> aliceToIssuer -- 14 USD --> issuerToOfferToIssuer -- 8 EUR --> issuerToBob --> bob
     
     
     style issuerToOfferToIssuer stroke:red,stroke-width:3px
@@ -1494,21 +1518,21 @@ flowchart LR
     issuerToOfferToIssuer{{BookStep<br>rev: 8 EUR out}}
     issuerToBob{{DirectStepI}}
     bob((Bob))
-    alice --> aliceToIssuer -- 12 USD --> issuerToOfferToIssuer -- 8 EUR --> issuerToBob --> bob
+    alice --> aliceToIssuer -- 14 USD --> issuerToOfferToIssuer -- 8 EUR --> issuerToBob --> bob
     
     style issuerToOfferToIssuer stroke:red,stroke-width:3px
 ```
 
-Now we know that the first step will require 12 USD output. We call its `rev` method with 12 USD desired output. However, this issuer charges a fee, so they require a 14 USD input!
+Now we know that the first step will require 14 USD output. We call its `rev` method with 14 USD desired output. Alice redeems USD to its issuer, which carries no fee, so the step requires a 14 USD input.
 
 ```mermaid
 flowchart LR
     alice((Alice))
-    aliceToIssuer{{DirectStepI<br>rev: 12 USD out}}
+    aliceToIssuer{{DirectStepI<br>rev: 14 USD out}}
     issuerToOfferToIssuer{{BookStep}}
     issuerToBob{{DirectStepI}}
     bob((Bob))
-    alice -- 14 USD --> aliceToIssuer -- 12 USD --> issuerToOfferToIssuer --> issuerToBob --> bob
+    alice -- 14 USD --> aliceToIssuer -- 14 USD --> issuerToOfferToIssuer --> issuerToBob --> bob
     
     style aliceToIssuer stroke:red,stroke-width:3px
 ```
@@ -1522,24 +1546,24 @@ flowchart LR
     issuerToOfferToIssuer{{BookStep}}
     issuerToBob{{DirectStepI}}
     bob((Bob))
-    alice -- 12 USD --> aliceToIssuer -- 10.29 USD --> issuerToOfferToIssuer --> issuerToBob --> bob
+    alice -- 12 USD --> aliceToIssuer -- 12 USD --> issuerToOfferToIssuer --> issuerToBob --> bob
     
     style aliceToIssuer stroke:blue,stroke-width:3px
 ```
 
-With this, **the reverse pass is completed.** `xrpld` will reexecute the first step in forwards direction in the scenario above as part of the reverse pass. However, we have noted that the limiting step was the first DirectStepI. In the forward pass, we will start from the first step after the limiting step - so we would start at BookStep. If the USD issuer was willing to pass through 12 USD at 1:1 rate, then the limiting step would have been the last one that failed - BookStep, so the forward pass would start at the second DirectStepI.
+With this, **the reverse pass is completed.** `xrpld` will reexecute the first step in forwards direction in the scenario above as part of the reverse pass. However, we have noted that the limiting step was the first DirectStepI. In the forward pass, we will start from the first step after the limiting step - so we would start at BookStep. If the USD issuer charged no transfer fee, then the limiting step would have been the last one that failed - BookStep, so the forward pass would start at the second DirectStepI.
 
-As the forward pass starts, we go to BookStep. The input is 10.29 USD and we are interested to see the output, which is 6.86 EUR.
+As the forward pass starts, we go to BookStep. The input is 12 USD. After the transfer fee, about 10.29 USD reaches the offers, and the output is 6.86 EUR.
 It is no surprise that the BookStep can provide this liquidity, since in the reverse pass it provided even more.
 
 ```mermaid
 flowchart LR
     alice((Alice))
     aliceToIssuer{{DirectStepI}}
-    issuerToOfferToIssuer{{BookStep<br>fwd: 10.29 USD in}}
+    issuerToOfferToIssuer{{BookStep<br>fwd: 12 USD in}}
     issuerToBob{{DirectStepI}}
     bob((Bob))
-    alice --> aliceToIssuer -- 10.29 USD --> issuerToOfferToIssuer -- 6.86 EUR --> issuerToBob --> bob
+    alice --> aliceToIssuer -- 12 USD --> issuerToOfferToIssuer -- 6.86 EUR --> issuerToBob --> bob
 
     style issuerToOfferToIssuer stroke:blue,stroke-width:3px
 ```
@@ -1567,66 +1591,80 @@ At this point, we can conclude that the strand can deliver 6.86 EUR to Bob in ex
 sb:           PaymentSandbox   # buffered ledger changes for this strand
 afView:       PaymentSandbox   # "all funds" snapshot of balances at the start (detects unfunded offers)
 limitingStep: int             # index of the step that capped the flow (none until found)
+limitStepOut: Amount          # the limiting step's output, input to the forward pass
 
 def strandFlow(strand, maxIn, out):
     if strand is empty or is a direct XRP->XRP transfer:
         return failure
 
-    # REVERSE pass: walk steps last -> first, asking each how much input it needs
-    # to produce the output the next step wants. See section 7.3.
-    stepOut = out
-    for step in reversed(strand):
-        step_in, step_out = step.rev(sb, afView, stepOut)
-        if step_out == 0:
-            return failure                  # strand is dry
+    limitingStep = None
 
-        if step is the first step and maxIn and step_in > maxIn:
-            # Input side is the bottleneck. Reset state and re-run this step
-            # forward, capped at maxIn. This becomes the limiting step.
-            reset(sb)
-            limitingStep = index(step)
-            step_in, step_out = step.fwd(sb, afView, maxIn)
-            if step_out == 0:
-                return failure
-            # This is a sanity check that should never fail. It verifies that when the limiting
-            # step is re-executed in a "cleaner" environment (with the sandbox reset), it can
-            # still produce the same result.
-            if step_in != maxIn:
-                return failure
-        elif step_out < stepOut:
-            # This step cannot deliver the full requested output. Reset state and
-            # re-run it in reverse for what it can actually deliver. It is the
-            # limiting step.
-            reset(sb, afView)
-            limitingStep = index(step)
-            stepOut = step_out
+    try:
+        # REVERSE pass: walk steps last -> first, asking each how much input it needs
+        # to produce the output the next step wants. See section 7.3.
+        stepOut = out
+        for step in reversed(strand):
             step_in, step_out = step.rev(sb, afView, stepOut)
             if step_out == 0:
-                return failure
-            # This is a sanity check that should never fail. It verifies that when the limiting
-            # step is re-executed in a "cleaner" environment (with the sandbox reset), it can
-            # still produce the same result.
-            if step_out != stepOut:
-                return failure
+                return failure                  # strand is dry
 
-        stepOut = step_in                   # the previous step must produce this
+            if step is the first step and maxIn and step_in > maxIn:
+                # Input side is the bottleneck. Reset state and re-run this step
+                # forward, capped at maxIn. This becomes the limiting step.
+                reset(sb)
+                limitingStep = index(step)
+                step_in, step_out = step.fwd(sb, afView, maxIn)
+                limitStepOut = step_out
+                if step_out == 0:
+                    return failure
 
-    # FORWARD pass: from the step after the limiting step to the last, recompute
-    # actual outputs now that the limited input is known. See section 7.3.
-    stepIn = limited_output_of(limitingStep)
-    for step in strand[limitingStep + 1:]:
-        step_in, step_out = step.fwd(sb, afView, stepIn)
-        if step_out == 0:
-            return failure                  # rounding drove output to zero
-        if step_in != stepIn:
-            return failure                  # limits already found; should not re-limit
-        stepIn = step_out
+                # Sanity check that should never fail: with the sandbox reset,
+                # the step consumes all of maxIn.
+                if step_in != maxIn:
+                    return failure
 
-    return success(
-        in = strand.first.cachedIn(),
-        out = strand.last.cachedOut(),
-        inactive = any(step.inactive() for step in strand),  # dry / too many offers
-        sandbox = sb)
+            elif not step.equalOut(step_out, stepOut):
+                # This step cannot deliver the full requested output. Reset state and
+                # re-run it in reverse for what it can actually deliver. It is the
+                # limiting step.
+                reset(sb, afView)
+                limitingStep = index(step)
+                stepOut = step_out
+                step_in, step_out = step.rev(sb, afView, stepOut)
+                limitStepOut = step_out
+                if step_out == 0:
+                    return failure
+
+                # Sanity check that should never fail: with the sandbox reset,
+                # the step still delivers the reduced output.
+                if not step.equalOut(step_out, stepOut):
+                    return failure
+
+            stepOut = step_in                   # the previous step must produce this
+
+        # FORWARD pass: from the step after the limiting step to the last, recompute
+        # actual outputs now that the limited input is known. See section 7.3.
+        # Without a limiting step the reverse pass already settled every step.
+        if limitingStep is not None:
+            stepIn = limitStepOut
+            for step in strand[limitingStep + 1:]:
+                step_in, step_out = step.fwd(sb, afView, stepIn)
+                if step_out == 0:
+                    return failure              # rounding drove output to zero
+
+                if not step.equalIn(step_in, stepIn):
+                    return failure              # limits already found; should not re-limit
+
+                stepIn = step_out
+
+        return success(
+            in = strand.first.cachedIn(),
+            out = strand.last.cachedOut(),
+            inactive = any(step.inactive() for step in strand),  # a BookStep hit its offer limit
+            sandbox = sb)
+
+    except FlowException:
+        return failure
 ```
 
 # 8. Validation and Error Codes
@@ -1679,6 +1717,6 @@ Errors returned by individual step implementations during strand construction or
 
 ## 8.3. MPT-Specific Validations[^mpt-validations]
 
-[^mpt-validations]: MPT validations in Flow steps: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/BookStep.cpp#L744-L747), [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L374-L375)
+[^mpt-validations]: MPT validations in Flow steps: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/paths/BookStep.cpp#L762-L769), [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L374-L375)
 
 When a cross-currency payment path includes MPT assets (with [MPTokensV2](https://xrpl.org/resources/known-amendments#mptokensv2) amendment enabled), the Flow engine validates MPTs using [`canTrade`](../mpts/README.md#361-cantrade). See [MPT Validation Functions](../mpts/README.md#36-mpt-validation-functions) for details on validation logic and error conditions.
