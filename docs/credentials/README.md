@@ -394,7 +394,7 @@ Accounts with the `lsfDepositAuth` flag set require incoming payments to be auth
 
 **CredentialIDs Field**:
 
-Transactions that move value (Payment, EscrowFinish, etc.) include an optional `CredentialIDs` field:
+The `CredentialIDs` field appears on transactions that deliver funds to a destination account, where that account may require deposit authorization. It lets the sender meet that requirement with credentials instead of an account-level preauthorization. These transactions are Payment, EscrowFinish, PaymentChannelClaim, AccountDelete, ConfidentialMPTSend, VaultWithdraw, and LoanBrokerCoverWithdraw:
 
 | Field Name | Required? | JSON Type | Internal Type | Description |
 |------------|:---------:|:---------:|:-------------:|:------------|
@@ -406,6 +406,10 @@ The sender includes the hashes of credentials they hold. During transaction proc
 3. Looks up each credential hash in `CredentialIDs`
 4. Checks that the `(issuer, credentialType)` pairs of all supplied credentials together form a set that exactly matches one of the destination's credential `DepositPreauth` entries
 5. Each supplied credential must exist, belong to the sender, and have `lsfAccepted` set (else `tecBAD_CREDENTIALS`); and must not be expired (else `tecEXPIRED`)
+
+Under the `fixCleanup3_4_0` amendment, a `CredentialIDs` entry of all zeros fails static validation with `temMALFORMED`. For the transactions that can carry the field without the amendment, it fails later with `tecBAD_CREDENTIALS`, because no credential has that key.[^cred-zero-id]
+
+[^cred-zero-id]: [`CredentialHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L144-L149), [`CredentialHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L166-L187)
 
 Supplying `CredentialIDs` is itself constrained: if any listed credential is expired, the transaction fails with `tecEXPIRED` before the deposit-authorization checks run, and this applies to any transaction that carries `CredentialIDs` (Payment, EscrowFinish, etc.), even when the destination does not require deposit authorization. The expired credential is also deleted as part of this (recovering its reserve), even though the transaction fails. Under the `fixCleanup3_1_3` amendment, if that deletion itself fails, the transaction halts and returns the deletion's error (e.g. `tecINTERNAL`) instead of `tecEXPIRED`.[^5]
 
@@ -458,6 +462,8 @@ AcceptedCredentials: [
 2. Sets `AcceptedCredentials` to specify required credentials
 3. Users attempting to interact with the domain must provide valid credentials
 4. The ledger checks the user holds a credential matching any entry in `AcceptedCredentials`
+
+Expired credentials are treated as missing for domain access, and some transactions also delete them. See [Credential Verification](../permissioned_domains/README.md#42-credential-verification).
 
 **Example**:
 

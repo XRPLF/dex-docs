@@ -102,7 +102,9 @@ flowchart LR
 
 The fee and sequence number are applied to the base ledger view by the transactor before offer crossing begins. Both sandboxes below are built over that base view, so the fee is recorded outside of them and persists regardless of which one is applied:
 - `sb`: the crossing results, the deletions of offers consumed or removed during crossing, and the new resting offer
-- `sbCancel`: the deletion of offers marked for permanent removal during crossing, such as expired, already-unfunded, invalid, no-longer-in-domain, or directly self-crossable offers
+- `sbCancel`: the deletion of offers marked for permanent removal during crossing, such as expired, already-unfunded, invalid, no-longer-in-domain, or directly self-crossable offers, and MPT offers whose crossing arithmetic overflows[^mpt-overflow-evict]
+
+[^mpt-overflow-evict]: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/paths/BookStep.cpp#L846-L867), [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/paths/OfferStream.cpp#L335-L367)
 
 When the offer will not be placed (a `tfFillOrKill` offer that cannot fully cross, or a `tfImmediateOrCancel` offer that crosses nothing), `sbCancel` is applied instead of `sb`. This discards the crossing and placement work while keeping the fee and permanent offer cleanup. See [Ledger Views and Sandboxes](../transactions/README.md#5-ledger-views-and-sandboxes) for how sandboxes provide atomic state changes.
 
@@ -193,7 +195,7 @@ The Flow engine evaluates both paths and selects the one(s) providing the best q
 
 Before the offer is sent to the Flow engine for crossing, a **quality threshold** is calculated from `takerPays` and `takerGets`. This represents the minimum exchange rate at which the offer can be crossed. If `takerGets` is a non-XRP asset (IOU or MPT) and the offer creator is not the issuer, `takerGets` is adjusted by multiplying it by the issuer's transfer rate to account for transfer fees. The quality threshold is then calculated as `takerPays / adjusted takerGets`. For a passive offer (`tfPassive`), the threshold is then incremented so the offer crosses only strictly-better-quality offers.[^passive-threshold]
 
-The Flow engine returns the amount that was filled. During offer crossing, the offer owner pays transfer fees (see [transfer rates in flow steps](../flow/steps.md#213-quality-functions)). The transfer fee is deducted from the owner's balance but does not reduce the offer's stated amounts. For example, if the original `takerGets` was 100 USD and 50 USD was transferred with a 2% transfer fee, the owner pays 51 USD from their balance, but the remaining offer balance is 50 USD.
+The Flow engine returns the amount that was filled. During offer crossing, the offer owner pays transfer fees (see [transfer rates in flow steps](../flow/steps.md#213-quality-functions)). The transfer fee is deducted from the owner's balance but does not reduce the offer's stated amounts. For example, if the original `takerGets` was 100 USD and 50 USD was transferred with a 2% transfer fee, the owner pays 51 USD from their balance, but the remaining offer balance is 50 USD. For an MPT `takerGets`, the fee is rounded up to a whole MPT unit, as in a direct MPT payment.[^mpt-fee-roundup]
 
 The transfer rate is read from the issuer's settings (AccountRoot `TransferRate` field for IOUs, or the MPTokenIssuance `TransferFee` field for MPTs) and applied identically during offer crossing, maintaining consistent offer book semantics across all asset types.
 
@@ -215,6 +217,7 @@ Both calculations preserve the original offer's quality, the `takerGets : takerP
 - If the offer is not filled at all, the original offer is recorded on the ledger, unless it is an ImmediateOrCancel or FillOrKill offer (which are never placed) or the account lacks the reserve for a new offer[^offer-reserve]
 - If, after partial filling, the signing account no longer has a positive balance in the `takerGets` currency, the remaining offer is not created[^no-balance-no-offer]. This check is skipped when `takerGets` is an MPT and the creator is its issuer (an issuer can supply the MPT without holding a balance), so the residual offer is still created in that case
 
+[^mpt-fee-roundup]: [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/paths/BookStep.cpp#L785-L801)
 [^buy-offer-residual]: Buy offer residual calculation: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L527-L533)
 [^sell-offer-residual]: Sell offer residual calculation: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L501-L520)
 [^no-balance-no-offer]: No balance check after crossing: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L480-L486)
@@ -234,8 +237,9 @@ Different asset types have different internal representations:
 - Upper 8 bits: exponent + 100
 - Lower 56 bits: mantissa
 
-`getRate` returns the rate `0` (and the offer is not stored) in three cases: when `takerGets` is zero, when the computed rate rounds to zero (the offer is 'too good' to represent), or when the computation overflows.
+`getRate` returns the rate `0` in three cases: when `takerGets` is zero, when the computed rate rounds to zero (the offer is 'too good' to represent), or when the computation overflows. Under the MPTokensV2 amendment, an offer with rate `0` skips `TickSize` rounding so it can still cross, and its remainder is never placed: if nothing crossed, the transaction fails with `tecKILLED`, otherwise it succeeds without a resting offer.[^zero-rate]
 
+[^zero-rate]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L721-L726), [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L873-L885)
 [^repr-xrp]: [`STAmount.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/protocol/STAmount.h#L55)
 [^repr-iou]: [`STAmount.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/protocol/STAmount.h#L47-L53)
 [^repr-mpt]: [`Protocol.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/protocol/Protocol.h#L234)
@@ -254,7 +258,7 @@ After the rate is rounded, one side of the offer is recomputed from the rounded 
 
 [^ticksize-range]: [`Quality.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/protocol/Quality.h#L97-L98)
 [^ticksize-round]: [`Quality.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Quality.cpp#L134-L162)
-[^ticksize-integral]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L668-L700)
+[^ticksize-integral]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L706-L743)
 
 ## 1.4. Offer deletion
 
@@ -268,7 +272,7 @@ If `OfferSequence` is provided:
 
 This mechanism is useful for updating an existing offer without the risk of having both the old and new offers active simultaneously.
 
-A domain or hybrid offer (one that sets `DomainID`) can use `OfferSequence` to cancel the signing account's own regular (non-domain) offer; see [State Changes](#3112-state-changes) for the amendment-gated details.
+A domain or hybrid offer (one that sets `DomainID`) can use `OfferSequence` to cancel the signing account's own regular (non-domain) offer, or its offer in a different domain. See [State Changes](#3112-state-changes).
 
 Direct [self-cross removal](#121-self-crossing) is separate from `OfferSequence`. It happens automatically during crossing and does not require the transaction to identify an offer to cancel.
 
@@ -288,8 +292,8 @@ A **hybrid offer** is an offer created with both the `DomainID` field set AND th
 
 Under the `fixCleanup3_3_0` amendment, a resting hybrid offer's domain membership is re-validated only while the domain book is being walked. When the owner loses domain access, for example through credential expiry, the open-book entry stays consumable until a domain-book walk encounters the offer and removes it entirely, from both books. Without the amendment, the membership check ran during any book walk, so open-book processing also removed the offer.[^hybrid-eviction]
 
-[^domain-book-segregation]: [`Indexes.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Indexes.cpp#L102-L110)
-[^hybrid-books]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L561-L603)
+[^domain-book-segregation]: [`Indexes.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/protocol/Indexes.cpp#L122-L134)
+[^hybrid-books]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L596-L638)
 [^hybrid-eviction]: [`OfferStream.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/OfferStream.cpp#L253-L267), [`OfferHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/OfferHelpers.cpp#L38-L60)
 
 # 2. Ledger Entries
@@ -393,13 +397,13 @@ This special behavior allows offers to succeed if they provide immediate value t
 The first 192 bits are the first 192 bits of [SHA512-Half](https://xrpl.org/docs/references/protocol/data-types/basic-data-types#hashes) of the following values, concatenated in order.[^book-dir-hash] The exact concatenation order depends on the asset types involved:
 
 - **IOU + IOU** (includes XRP): `BOOK_DIR`, `takerPays` currency, `takerGets` currency, `takerPays` issuer, `takerGets` issuer, [`domainID`]
-- **IOU + MPT**: `BOOK_DIR`, `takerPays` currency, `takerGets` MPT ID, `takerPays` issuer, [`domainID`]
-- **MPT + IOU** (includes XRP): `BOOK_DIR`, `takerPays` MPT ID, `takerGets` currency, `takerGets` issuer, [`domainID`]
-- **MPT + MPT**: `BOOK_DIR`, `takerPays` MPT ID, `takerGets` MPT ID, [`domainID`]
+- **IOU + MPT**: `BOOK_DIR`, `0x01`, `takerPays` currency, `takerGets` MPT ID, `takerPays` issuer, [`domainID`]
+- **MPT + IOU** (includes XRP): `BOOK_DIR`, `0x02`, `takerPays` MPT ID, `takerGets` currency, `takerGets` issuer, [`domainID`]
+- **MPT + MPT**: `BOOK_DIR`, `0x03`, `takerPays` MPT ID, `takerGets` MPT ID, [`domainID`]
 
-The Book directory space key (`BOOK_DIR`) is `0x0042`. For XRP, the currency code is 160 bits of zeros and the issuer is 160 bits of zeros. The `domainID` is included only when specified (for permissioned domains).
+The Book directory space key (`BOOK_DIR`) is `0x0042`. The one-byte tag distinguishes MPT book shapes. Without it, IOU + MPT and MPT + IOU inputs have the same length, and chosen currency, MPT ID, and account bytes could align to produce the same key. For XRP, the currency code is 160 bits of zeros and the issuer is 160 bits of zeros. The `domainID` is included only when specified (for permissioned domains).
 
-[^book-dir-hash]: Book directory hash computation: [`Indexes.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Indexes.cpp#L102-L141)
+[^book-dir-hash]: Book directory hash computation: [`Indexes.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/protocol/Indexes.cpp#L122-L182)
 
 The last 64 bits encode the exchange rate (`takerPays / takerGets`) as a 64-bit value in big-endian format.
 
@@ -444,7 +448,7 @@ Pages form a doubly-linked list structure:
 - The root page is only deleted when the entire directory becomes empty and `keepRoot` is false
 
 [^dir-page-limit]: [`ApplyView.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/ApplyView.cpp#L124-L129)
-[^page-keylet]: [`Indexes.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/protocol/Indexes.cpp#L362-L369)
+[^page-keylet]: [`Indexes.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/protocol/Indexes.cpp#L399-L406)
 [^dir-append-insert]: [`ApplyView.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/ledger/ApplyView.h#L326-L380)
 
 ### 2.2.3. Fields
@@ -535,11 +539,14 @@ For this reason, certain `tec` outcomes are covered in the [state changes](#3112
       - `tecNO_AUTH`: `tapRETRY` is not enabled.
   - `tecFROZEN`: trust line between signing account and the `takerPays` issuer account is deeply frozen, either on low or high
     side.
+  - `takerPays` is an IOU issued by an account other than the signing account, the issuer has `lsfDisallowIncomingTrustline`, and no trust line for the `takerPays` currency exists between the signing account and the issuer. Receiving the IOU would require a new trust line that the issuer does not allow:[^disallow-incoming]
+      - `terNO_LINE`: `tapRETRY` enabled
+      - `tecNO_LINE`: `tapRETRY` is not enabled.
 - `tecNO_AUTH`: `takerPays` is an MPT and the signing account is not authorized to hold the MPT. Authorization is checked via `lsfMPTAuthorized` flag on the holder's MPToken, or through valid domain credentials if the MPTokenIssuance has a DomainID set. See [DomainID and Authorization](../mpts/README.md#11-domainid-and-authorization) for details.[^checkAcceptAsset-mpt-auth]
 - `tecNO_PERMISSION`:
     - `DomainID` is specified but one of the following domain access requirements is not met:
         - The specified domain must exist
-        - The offer creator must be in the domain (either the domain owner or hold a valid accepted credential that is not expired)
+        - The offer creator must be the domain owner, or hold a credential listed in the domain's `AcceptedCredentials` that is either accepted and unexpired, or expired (an expired one leads to `tecEXPIRED` below)
     - MPT validation failure (see below)
 - `tecOBJECT_NOT_FOUND`: MPT validation failure (see below)
 - `tecNO_ISSUER`: MPT validation failure (see below)
@@ -549,6 +556,9 @@ For this reason, certain `tec` outcomes are covered in the [state changes](#3112
 
 [^checkAcceptAsset-noauth]: Unauthorized trust line returns auth errors: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L307)
 [^checkAcceptAsset-mpt-auth]: MPT authorization via requireAuth with WeakAuth: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L330-L340), [`View.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/MPTokenHelpers.cpp#L360-L384)
+[^disallow-incoming]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L280-L323)
+[^domain-expired]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L241-L270), [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L1026-L1045), [`CredentialHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L334-L368)
+[^domain-cancel-other]: [`PermissionedDEXInvariant.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/invariants/PermissionedDEXInvariant.cpp#L29-L33), [finalize](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/invariants/PermissionedDEXInvariant.cpp#L101-L121)
 [^domainid-zero]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L99-L101)
 [^domain-cancel-regular]: [`PermissionedDEXInvariant.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/invariants/PermissionedDEXInvariant.cpp#L41-L43), [finalize](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/invariants/PermissionedDEXInvariant.cpp#L105-L111)
 [^offer-expired]: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L222-L228), [doApply](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L651-L657)
@@ -561,12 +571,14 @@ For this reason, certain `tec` outcomes are covered in the [state changes](#3112
 **Validation during doApply:**
 
 - `tecEXPIRED`: the `Expiration` field is before the close time of the previously closed ledger (re-checked during doApply in case the offer expired after preclaim).
+- `tecEXPIRED`: `DomainID` is specified and the offer creator has no accepted, unexpired matching credential left after its expired ones are deleted. The deletions still apply (see [State Changes](#3112-state-changes)).[^domain-expired]
 
 #### 3.1.1.2. State Changes
 
 - `Offer` object is **deleted**:
     - If `OfferSequence` field is specified and the offer with that sequence exists, it is deleted. See [OfferCancel State Changes](#3122-state-changes) for details on the deletion process
     - When the new offer sets `DomainID` (a domain or hybrid offer), the offer cancelled via `OfferSequence` may be the signing account's own regular (non-domain) offer. Under the `fixCleanup3_2_0` amendment this is permitted; before the amendment the `ValidPermissionedDEX` invariant treated the deleted regular offer as a violation and failed the transaction with `tecINVARIANT_FAILED`.[^domain-cancel-regular]
+    - The cancelled offer may also rest in a different domain than the new offer. This is permitted as well.[^domain-cancel-other]
     - During default-path crossing, any existing offer owned by the signing account that would directly cross the new offer is deleted in full, regardless of the relative amounts. See [Self-Crossing](#121-self-crossing)
 
 
@@ -597,6 +609,10 @@ For this reason, certain `tec` outcomes are covered in the [state changes](#3112
 
 - Order books are **registered** in `OrderBookDB` (if not already present):
     - Trading pair registered for the offer's assets and domain. See [OrderBookDB documentation](../path_finding/README.md#26-orderbookdb) for details.
+
+
+- `Credential` objects are **deleted**:
+    - When `DomainID` is specified and the creator is not the domain owner, the creator's expired credentials that match the domain's `AcceptedCredentials` are deleted. This lowers the reserve required of each credential's owner. See [Credential Verification](../permissioned_domains/README.md#42-credential-verification).[^domain-expired]
 
 
 - `AccountRoot` object is **modified**:

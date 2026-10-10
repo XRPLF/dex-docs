@@ -223,7 +223,7 @@ classDiagram
 
 ## 2.2. Processing Flow
 
-Transaction processing follows a three-phase pipeline: preflight (static validation), preclaim (ledger-based validation), and doApply (execution). Each phase can fail and return an error to the client. The `Transactor` base class coordinates this flow by calling into derived transaction classes at specific validation and execution points.
+Each phase can fail and return an error to the client. The `Transactor` base class coordinates this flow by calling into derived transaction classes at specific validation and execution points.
 
 The table below shows the main functions called during each phase. The "Implemented By" column indicates whether the function is implemented in `applySteps.cpp` (the top-level orchestrator for each phase), the `Transactor` base class (providing common behavior for all transactions), or the `Derived` transaction-specific class (e.g., `Payment`, `AMMCreate`). "Transactor (overridable)" means the base class provides a default implementation that derived classes may optionally override.
 
@@ -315,6 +315,7 @@ Preflight validation is orchestrated by `Transactor::invokePreflight<T>()` which
    - Verify signature appears valid (cryptographic check)
    - Validate multi-signature if present
    - Check signature authorization requirements
+   - Verify the sponsor's co-signature (`SponsorSignature`), if present. The sponsor signs bytes specific to the sponsor role, so its signature cannot stand in for the account's own signature, or the other way around.
 
 7. **preflightSigValidated()**: Post-signature validation (Transactor base class method, rarely overridden)
    - Optional checks after signature validation
@@ -582,7 +583,7 @@ else
     sbCancel.apply(ctx_.rawView());
 ```
 
-[^conditional-atomicity]: Conditional atomicity pattern in OfferCreate: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L969-L990)
+[^conditional-atomicity]: Conditional atomicity pattern in OfferCreate: [`OfferCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/OfferCreate.cpp#L1047-L1065)
 
 [^balanceHook]: Balance hook description from source comments: [`ReadView.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/ledger/ReadView.h#L149-L153)
 
@@ -594,7 +595,7 @@ Reserves are XRP an account must hold and cannot send to others (`AccountDelete`
 
 # 7. Sponsorship (Sponsor Amendment, XLS-68)
 
-The `Sponsor` amendment (XLS-68) lets a sponsor account pay another account's fees and cover its reserves. A transaction opts in with the common `Sponsor` and `SponsorFlags` fields, choosing fee sponsorship, reserve sponsorship, or both. The sponsor approves by co-signing the transaction (`SponsorSignature`) or in advance through a standing `Sponsorship` ledger entry, managed with the `SponsorshipSet` and `SponsorshipTransfer` transactions. The pipeline hooks are described in [section 3](#3-transaction-processing-pipeline).[^sponsorship]
+The `Sponsor` amendment (XLS-68) lets a sponsor account pay another account's fees and cover its reserves. A transaction opts in with the common `Sponsor` and `SponsorFlags` fields, choosing fee sponsorship, reserve sponsorship, or both. The sponsor approves by co-signing the transaction (`SponsorSignature`) or in advance through a standing `Sponsorship` ledger entry, managed with the `SponsorshipSet` and `SponsorshipTransfer` transactions. The co-signature covers bytes specific to the sponsor role, so a signature made for one role cannot be presented in another. The pipeline hooks are described in [section 3](#3-transaction-processing-pipeline).[^sponsorship]
 
 With fee sponsorship, the sponsor becomes the fee payer. With reserve sponsorship, a created object records its sponsor (the `Sponsor` field on most entry types, `HighSponsor` or `LowSponsor` per trust line side) and counts against the sponsor's reserve instead of the owner's: the owner count used for reserve calculations becomes `OwnerCount - SponsoredOwnerCount + SponsoringOwnerCount`. Deletion releases the reserve against the recorded sponsor.[^sponsor-reserve]
 
@@ -604,6 +605,6 @@ The `BatchV1_1` amendment adds the `Batch` transaction, which wraps several inne
 
 [^fees]: [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/Transactor.cpp#L448-L473), [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/Transactor.cpp#L621-L695)
 [^reserves]: [`Fees.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/Fees.h#L46-L56), [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L690-L713)
-[^sponsorship]: [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/Transactor.cpp#L175-L225), [`transactions.macro`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/detail/transactions.macro#L1168-L1195), [`ledger_entries.macro`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/detail/ledger_entries.macro#L627-L637)
+[^sponsorship]: [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/Transactor.cpp#L175-L225), [`transactions.macro`](https://github.com/XRPLF/rippled/blob/3.4.0/include/xrpl/protocol/detail/transactions.macro#L1107-L1132), [`ledger_entries.macro`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/detail/ledger_entries.macro#L627-L637)
 [^sponsor-reserve]: [`LedgerFormats.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/protocol/LedgerFormats.cpp#L11-L21), [`AccountRootHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/AccountRootHelpers.cpp#L142-L200), [`AccountRootHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/AccountRootHelpers.cpp#L229-L266), [`AccountRootHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/AccountRootHelpers.cpp#L359-L378)
-[^batch]: [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/Transactor.cpp#L282-L290), [`apply.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/apply.cpp#L180-L204), [`Batch.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/system/Batch.cpp#L53-L147), [`Batch.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/system/Batch.cpp#L328-L335), [`Batch.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/system/Batch.cpp#L404-L556), [`TER.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/TER.h#L131)
+[^batch]: [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/Transactor.cpp#L282-L290), [`apply.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/apply.cpp#L180-L204), [`Batch.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/system/Batch.cpp#L53-L156), [`Batch.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/system/Batch.cpp#L328-L335), [`Batch.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/system/Batch.cpp#L404-L556), [`TER.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/TER.h#L131)

@@ -1,5 +1,5 @@
 > [!NOTE]
-> This documentation reflects the XRP Ledger release [3.3.0](https://github.com/XRPLF/rippled/tree/3.3.0).
+> This documentation reflects the XRP Ledger release [3.4.0](https://github.com/XRPLF/rippled/tree/3.4.0).
 
 > [!WARNING]
 > 🚧 This documentation is **work in progress**
@@ -49,8 +49,8 @@ XRP is the native currency on the XRP Ledger network. The balance is tracked in 
 
 Aside from being a tradable asset, XRP serves two essential functions in the network. First, all low-level transaction fees (not to be confused with transfer fees) are paid in XRP.[^xrp-fees] When a transaction is processed, the fee is deducted from the sender's XRP balance and destroyed (burned), permanently removing it from circulation. Second, every account must maintain a minimum XRP balance called the reserve.[^xrp-reserve] The reserve requirement increases with each object the account owns on the ledger, such as trust lines, offers, or other entries.
 
-[^xrp-fees]: Transaction fee deduction: [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/Transactor.cpp#L443)
-[^xrp-reserve]: Account reserve calculation: [`Fees.h`](https://github.com/XRPLF/rippled/blob/3.2.0/include/xrpl/protocol/Fees.h#L37-L46)
+[^xrp-fees]: Transaction fee deduction: [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/Transactor.cpp#L680-L690)
+[^xrp-reserve]: Account reserve calculation: [`Fees.h`](https://github.com/XRPLF/rippled/blob/3.4.0/include/xrpl/protocol/Fees.h#L46-L56)
 
 ## 2.2. IOU
 

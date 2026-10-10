@@ -2,6 +2,7 @@
 
 - [1. Introduction](#1-introduction)
     - [1.1. DomainID and Authorization](#11-domainid-and-authorization)
+    - [1.2. Confidential Balances](#12-confidential-balances)
 - [2. Ledger Entries](#2-ledger-entries)
     - [2.1. MPTokenIssuance Ledger Entry](#21-mptokenissuance-ledger-entry)
         - [2.1.1. Object Identifier](#211-object-identifier)
@@ -64,6 +65,18 @@ The `MPTokenIssuance` ledger entry has an optional `DomainID` field that control
 - Requires both `lsfMPTRequireAuth` flag (see [Flags](#2121-flags)) and the `featurePermissionedDomains` and `featureSingleAssetVault` amendments
 
 This MPT authorization mechanism is **separate and independent** from PermissionedDEX domain restrictions on offers. The `MPTokenIssuance.DomainID` controls who can hold and receive the MPT (verified whenever an account receives the MPT), while `Offer.DomainID` controls which order book an offer is placed in and restricts liquidity consumption to that domain's order book during payments and offer crossing (see [Domain Payments](../flow/README.md#33-domain-payments)). MPTs can be traded in [domain offers](../offers/README.md#151-domain-offers), [open offers](../offers/README.md#15-permissioned-dex), and [hybrid offers](../offers/README.md#152-hybrid-offers) regardless of whether the `MPTokenIssuance` has a `DomainID` set - creating an offer with `Offer.DomainID` requires the offer creator to have domain access, but does not require the MPT itself to have a `DomainID`.
+
+## 1.2. Confidential Balances
+
+MPT balances are normally public. The `ConfidentialTransfer` amendment lets a holder keep part of their balance encrypted. This encrypted part is the confidential balance. It has two parts: a spending balance, and an inbox that collects incoming funds until the holder merges them into the spending balance. The holder, the issuer, and an optional auditor can each read the confidential balance with their own key.
+
+Validators never decrypt confidential balances, yet they still update them. This works because the encryption is additive: adding two values encrypted under the same key produces their encrypted sum, without decrypting either one. To send confidential funds, the sender encrypts the amount once for each reader: for themselves, for the recipient, for the issuer, and for the auditor if there is one. The ledger subtracts the sender's copy from the sender's spending balance and adds the recipient's copy to the recipient's inbox. It never learns the amount.
+
+Validators cannot see the numbers, so the sender must prove they are honest. A zero-knowledge proof does this without revealing those numbers. It shows that every copy encrypts the same amount, and that neither the amount nor the sender's remaining balance is negative. A sender therefore cannot create funds, spend more than they have, or charge themselves a different amount than the recipient receives.
+
+Some amounts stay public. Moving funds into or out of a confidential balance reveals the amount, as does a clawback, which reveals the holder's full confidential balance. The issuance also shows its total outstanding amount and how much of it is confidential.
+
+See [Confidential MPT Balances](#5-confidential-mpt-balances-confidentialtransfer-amendment) for setup and the transactions involved.
 
 # 2. Ledger Entries
 
@@ -163,7 +176,7 @@ Where `sequence` is the issuer's sequence number at creation time and `issuer` i
 | `PreviousTxnID`     | UInt256   | Yes      | Transaction hash that most recently modified this entry                                                                 |
 | `PreviousTxnLgrSeq` | UInt32    | Yes      | Ledger sequence of the transaction that most recently modified this entry                                               |
 
-[^outstanding-balance]: [`MPTInvariant.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/invariants/MPTInvariant.cpp#L398-L418), [`finalize`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/invariants/MPTInvariant.cpp#L454-L470)
+[^outstanding-balance]: [`MPTInvariant.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/invariants/MPTInvariant.cpp#L398-L418), [`finalize`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/invariants/MPTInvariant.cpp#L523-L551)
 
 **Field constraints**:
 - `TransferFee`: If non-zero, requires `lsfMPTCanTransfer` flag and is incompatible with `lsfMPTCanHoldConfidentialBalance`
@@ -228,7 +241,7 @@ Creating an `MPTokenIssuance` always requires one owner reserve. The issuer's `O
 
 Under the `Sponsor` amendment, the issuance's reserve can be covered by a reserve sponsor recorded in the entry's `Sponsor` field. The sponsor, rather than the issuer, then bears the reserve, and destroying the issuance releases it against the recorded sponsor. The sponsorship mechanism is described in the [transactions documentation](../transactions/README.md).[^mpt-sponsor]
 
-[^mpt-sponsor]: [`SponsorHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/SponsorHelpers.cpp#L28-L61), [`SponsorHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/SponsorHelpers.cpp#L267-L285), [`MPTokenIssuanceCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/MPTokenIssuanceCreate.cpp#L123-L229)
+[^mpt-sponsor]: [`SponsorHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/SponsorHelpers.cpp#L28-L61), [`SponsorHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/SponsorHelpers.cpp#L267-L285), [`MPTokenIssuanceCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/token/MPTokenIssuanceCreate.cpp#L123-L229)
 
 ## 2.2. MPToken Ledger Entry
 
@@ -289,8 +302,8 @@ The `lsfMPTAuthorized` flag is only relevant when the issuance has `lsfMPTRequir
 
 The `lsfMPTAMM` flag is automatically set when an AMM creates an `MPToken` for an MPT in its pool (which requires the MPTokensV2 amendment). The AMM's `MPToken` is created with both `lsfMPTAMM` and `lsfMPTAuthorized`, even when the issuance has `lsfMPTRequireAuth`. AMM pseudo-accounts, like Vault and LoanBroker pseudo-accounts, are implicitly authorized, so `requireAuth` succeeds for them and they can hold a require-auth MPT. This implicit authorization cannot be revoked. Under the `fixCleanup3_3_0` amendment, the exemption applies at the start of the authorization check: a pseudo-account passes `requireAuth` even without an existing `MPToken` entry and skips the vault-share and permissioned-domain checks. Without the amendment, the exemption only bypasses the final `lsfMPTAuthorized` flag test, so a pseudo-account with no `MPToken` entry fails strong authorization with `tecNO_AUTH`.[^mpt-pseudo-auth] An `MPTokenAuthorize` transaction naming an AMM, Vault, or LoanBroker pseudo-account as `Holder` fails with `tecNO_PERMISSION`. See [AMM documentation](../amms/README.md) for AMM pseudo-account behavior.[^mpt-amm-auth]
 
-[^mpt-amm-auth]: [`AMMCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMCreate.cpp#L327-L337), [`requireAuth`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/MPTokenHelpers.cpp#L329-L348), [`MPTokenAuthorize.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/token/MPTokenAuthorize.cpp#L134-L139)
-[^mpt-pseudo-auth]: [`MPTokenHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/MPTokenHelpers.cpp#L319-L425)
+[^mpt-amm-auth]: [`AMMCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMCreate.cpp#L327-L337), [`requireAuth`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/MPTokenHelpers.cpp#L383-L401), [`MPTokenAuthorize.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/token/MPTokenAuthorize.cpp#L149-L154)
+[^mpt-pseudo-auth]: [`MPTokenHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/MPTokenHelpers.cpp#L373-L478)
 
 ### 2.2.3. Pseudo-accounts
 
@@ -307,13 +320,13 @@ MPToken reserves are determined by the account's total `OwnerCount`:
 - **OwnerCount < 2**: No reserve required for creating `MPToken`
 - **OwnerCount >= 2**: One owner reserve per `MPToken`
 
-The holder's `OwnerCount` is always incremented when an `MPToken` is created and decremented when deleted. This differs from trust lines, which only increment `OwnerCount` when in non-default state. The reserve grace for the first two owned items, however, mirrors trust-line reserve behavior: no incremental reserve is enforced while `OwnerCount` is below 2.[^mpt-reserve]
+The holder's `OwnerCount` is always incremented when an `MPToken` is created and decremented when deleted. This differs from trust lines, which only increment `OwnerCount` when in non-default state. The grace for the first two owned items is the same as for trust lines.[^mpt-reserve]
 
 [^mpt-reserve]: [`MPTokenHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/MPTokenHelpers.cpp#L191-L212)
 
 Under the `Sponsor` amendment, an `MPToken` created by a sponsored `MPTokenAuthorize` records the sponsor in its `Sponsor` field, and the sponsor bears the reserve. The reserve waiver for fewer than two owned objects does not apply to a sponsored transaction. `MPToken` entries auto-created during payment execution and offer crossing are never sponsored.[^mptoken-sponsor]
 
-[^mptoken-sponsor]: [`MPTokenHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/MPTokenHelpers.cpp#L167-L232), [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/BookStep.cpp#L730-L740), [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L404-L420)
+[^mptoken-sponsor]: [`MPTokenHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/MPTokenHelpers.cpp#L167-L232), [`BookStep.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/paths/BookStep.cpp#L926-L940), [`MPTEndpointStep.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/paths/MPTEndpointStep.cpp#L411-L434), [`MPTokenHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/MPTokenHelpers.cpp#L1034-L1042)
 
 # 3. Transactions
 
@@ -333,13 +346,13 @@ The `MPTokenIssuanceCreate` transaction creates a new MPT issuance with specifie
 | `Flags`           |                    | `Conditional` |        `Number`        |   `UInt32`    |      `0`      | Capability flags                                                                                                                     |
 | `ImmutableFlags`  |                    |    `No`     |        `Number`        |   `UInt32`    |      `0`      | Capability flags and fields declared immutable. Requires [DynamicMPT](https://github.com/XRPLF/XRPL-Standards/tree/master/XLS-0094-dynamic-MPT) amendment.       |
 
-`Conditional` modifiability (in the table above) means the field or its capability flags can be changed after creation via `MPTokenIssuanceSet` under the DynamicMPT amendment, unless the matching `tif*` bit is declared in `ImmutableFlags`. Capability flags can only be enabled later, never cleared.
+`Conditional` modifiability (in the table above) means the field or its capability flags can be changed after creation via `MPTokenIssuanceSet` under the DynamicMPT amendment, unless the matching `tif*` bit is declared in `ImmutableFlags` (see [Flag Mutability](#2121-flags)).
 
 **Transaction Flags (Capability Flags)**:
 
 | Flag Name          | Hex Value    | Description                                       |
 |--------------------|--------------|---------------------------------------------------|
-| `tfMPTCanLock`     | `0x00000002` | Enable individual holder locking                  |
+| `tfMPTCanLock`     | `0x00000002` | Permit the issuer to lock the MPT, globally or per holder |
 | `tfMPTRequireAuth` | `0x00000004` | Require authorization before holders can transact |
 | `tfMPTCanEscrow`   | `0x00000008` | Enable escrow functionality                       |
 | `tfMPTCanTrade`    | `0x00000010` | Enable trading on DEX                             |
@@ -351,7 +364,7 @@ There is no flag to lock the issuance at creation. `lsfMPTLocked` is intentional
 
 **ImmutableFlags (Immutability Declarations)**:
 
-These bits declare a capability flag or field immutable. Anything not declared immutable can be changed later via `MPTokenIssuanceSet` under the DynamicMPT amendment (capability flags can only be enabled, never cleared):
+These bits declare a capability flag or field immutable:
 
 | Flag Name             | Hex Value    | Description                                    |
 |-----------------------|--------------|------------------------------------------------|
@@ -390,7 +403,7 @@ These bits declare a capability flag or field immutable. Anything not declared i
 
 **Validation during doApply**[^mptissuancecreate-doapply-validation]
 
-[^mptissuancecreate-doapply-validation]: Validation during doApply (reserve, directory, and internal checks in `create`): [`MPTokenIssuanceCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/MPTokenIssuanceCreate.cpp#L123-L229)
+[^mptissuancecreate-doapply-validation]: Validation during doApply (reserve, directory, and internal checks in `create`): [`MPTokenIssuanceCreate.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/token/MPTokenIssuanceCreate.cpp#L123-L229)
 
 - `tecINSUFFICIENT_RESERVE`: the account's pre-fee balance is below the reserve required for one additional owned object (base reserve plus per-owner increments). For a sponsored reserve, the sponsor has insufficient XRP or the pre-funded sponsorship has no remaining owner-count allowance
 - `tecDIR_FULL`: Owner directory is full and cannot accommodate the new issuance
@@ -508,7 +521,7 @@ The `MPTokenIssuanceSet` transaction is **sent by the issuer only** to modify mu
 | `tfMPTSetCanClawback` | `0x00000080` | Enable `lsfMPTCanClawback` (DynamicMPT) |
 | `tfMPTSetCanHoldConfidentialBalance` | `0x00000100` | Enable `lsfMPTCanHoldConfidentialBalance` (DynamicMPT and ConfidentialTransfer) |
 
-The `tfMPTSet*` flags only enable capability flags. A capability flag can never be cleared. Enabling a flag whose `tif*` bit is declared in `ImmutableFlags` fails with `tecNO_PERMISSION`.
+The `tfMPTSet*` flags only enable capability flags. Enabling a flag whose `tif*` bit is declared in `ImmutableFlags` fails with `tecNO_PERMISSION`.
 
 **Behavior**:
 
@@ -556,7 +569,7 @@ The `tfMPTSet*` flags only enable capability flags. A capability flag can never 
   - `DomainID` specified (non-zero) but domain does not exist
 - `tecNO_PERMISSION`:
   - Signing account is not the issuer
-  - Attempting to lock/unlock without `lsfMPTCanLock` (when [SingleAssetVault](https://xrpl.org/resources/known-amendments#singleassetvault) or [DynamicMPT](https://xrpl.org/resources/known-amendments#dynamicmpt) is enabled). When neither amendment is enabled, an issuance without `lsfMPTCanLock` rejects any `MPTokenIssuanceSet` with `tecNO_PERMISSION`
+  - Attempting to lock/unlock without `lsfMPTCanLock` (when [SingleAssetVault](https://xrpl.org/resources/known-amendments#singleassetvault) or [DynamicMPT](https://xrpl.org/resources/known-amendments#dynamicmpt) is enabled). When neither amendment is enabled, an issuance without `lsfMPTCanLock` rejects any `MPTokenIssuanceSet` with `tecNO_PERMISSION`. This dates from when the transaction could only lock and unlock.
   - `DomainID` field is present (to set, or to clear with `DomainID` = 0) but the issuance does not have `lsfMPTRequireAuth`
   - Enabling a capability flag (via a `tfMPTSet*` flag) whose `tif*` bit is declared in the issuance's `ImmutableFlags`
   - Changing `MPTokenMetadata` when `tifMPTMetadata` is declared
@@ -644,7 +657,7 @@ Issuer-initiated authorize/unauthorize only applies when the issuance has `lsfMP
 
 **Validation against the ledger view**[^mptokenauthorize-preclaim-validation]
 
-[^mptokenauthorize-preclaim-validation]: Validation against ledger view (preclaim): [`MPTokenAuthorize.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/MPTokenAuthorize.cpp#L35-L160)
+[^mptokenauthorize-preclaim-validation]: Validation against ledger view (preclaim): [`MPTokenAuthorize.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/token/MPTokenAuthorize.cpp#L35-L157)
 
 **When Holder NOT specified (holder-initiated)**:
 
@@ -654,7 +667,7 @@ Issuer-initiated authorize/unauthorize only applies when the issuance has `lsfMP
   - `tecHAS_OBLIGATIONS`: 
     - `MPTAmount` is non-zero (cannot delete with balance)
     - `LockedAmount` is non-zero (cannot delete with locked MPTs)
-  - With [SingleAssetVault](https://xrpl.org/resources/known-amendments#singleassetvault): `tecNO_PERMISSION`: `MPToken` is individually locked
+  - `tecNO_PERMISSION`: the `MPToken` is individually locked while its issuance still exists. Deleting the entry and creating it again would otherwise clear the holder's lock, because a new `MPToken` starts unlocked. Once the issuance is destroyed, nobody can unlock the entry, so an orphaned locked `MPToken` can be deleted. This applies under `fixCleanup3_4_0`. Without the amendment, the check applies only when [SingleAssetVault](https://xrpl.org/resources/known-amendments#singleassetvault) is enabled, and then it also blocks deleting an orphaned locked `MPToken`.
 - If NOT `tfMPTUnauthorize`:
   - `tecOBJECT_NOT_FOUND`: `MPTokenIssuance` does not exist 
   - `tecDUPLICATE`: `MPToken` already exists
@@ -808,15 +821,13 @@ These checks cover *tradability* and *transferability* only. Two related concern
 - `tecOBJECT_NOT_FOUND`: MPTokenIssuance does not exist
 - `tecNO_PERMISSION`: `lsfMPTCanTrade` flag not set
 
-`canTrade` does **not** check lock status or holder authorization. Those are handled separately by `isFrozen` and `requireAuth`.
-
 ### 3.6.2. canTransfer
 
 `canTransfer(view, mptIssue, from, to, waive = No)` checks whether `to` may receive the MPT from `from`.[^mpt-cantransfer]
 
 [^mpt-cantransfer]: [`canTransfer`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/MPTokenHelpers.cpp#L550-L605)
 
-**Used by**: holder-to-holder MPT payments (`MPTEndpointStep`, `Payment`), `CheckCash`/`CheckCreate`, `EscrowCreate`, Vault and Lending transactions, and offer-owner validation in `BookStep`.
+**Used by**: holder-to-holder MPT payments (`MPTEndpointStep`, `Payment`), `CheckCash`/`CheckCreate`, `EscrowCreate`, Vault and Lending transactions, offer-owner validation in `BookStep`, and AMM LP tokens (see below).
 
 **Passes when any of**:
 - `waive` is `WaiveMPTCanTransfer::Yes` (recovery paths, e.g. unwinding vault or lending positions after transferability is revoked)
@@ -824,6 +835,10 @@ These checks cover *tradability* and *transferability* only. Two related concern
 - **`lsfMPTCanTransfer` flag set** on the issuance
 
 Otherwise returns `tecNO_AUTH`. Vault shares recurse into the underlying asset's transferability (when the `fixCleanup3_2_0` amendment is enabled).
+
+**AMM LP tokens**: when an AMM's pool holds MPTs, `canTransferLPToken` applies `canTransfer` to that AMM's LP tokens. The check passes only when every MPT in the pool has `lsfMPTCanTransfer` or is issued by the account. Otherwise the account's LP tokens count as unspendable. A payment that moves them to another holder also fails, at the step where the sender returns them to the AMM, which issues them. This parallels how a frozen pool asset blocks LP token movement. `AMMWithdraw` is not affected. Only an AMM holding an MPT is affected, which requires `MPTokensV2`.[^mpt-lptoken-cantransfer]
+
+[^mpt-lptoken-cantransfer]: [`View.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/View.cpp#L183-L208), [`DirectStep.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/paths/DirectStep.cpp#L846-L858), [`TokenHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/TokenHelpers.cpp#L284-L320)
 
 **Possible error codes**:
 
@@ -959,6 +974,13 @@ When MPTokensV2 is enabled, MPT payments run through the Flow engine and lock/fr
 
 The `ConfidentialTransfer` amendment lets holders of an issuance with `lsfMPTCanHoldConfidentialBalance` keep part of their balance on the ledger in encrypted form (ElGamal ciphertexts) and move it without revealing amounts. Malformed ciphertexts fail with `temBAD_CIPHERTEXT`. Cryptographically invalid zero-knowledge proofs fail with `tecBAD_PROOF`. Every confidential transaction charges nine extra base fees on top of the normal fee.[^ct-overview]
 
+Before holders can use confidential balances, the issuer sets up the issuance:
+
+1. **The issuer opts in.** The issuance needs the `lsfMPTCanHoldConfidentialBalance` capability. The issuer can set it at creation, or enable it later through `MPTokenIssuanceSet` when `DynamicMPT` is enabled and the issuance permits the change.
+2. **The issuer installs its encryption key.** The issuer registers its `IssuerEncryptionKey` through `MPTokenIssuanceSet`. An optional auditor key must be registered in the same transaction as the issuer key. Neither key can be replaced. Until the issuer key is in place, holders cannot convert, send, or convert back confidential funds, and the issuer cannot claw them back.
+
+Holders then use these transactions:
+
 - `ConfidentialMPTConvert` moves public balance into encrypted form: the holder's `MPTAmount` decreases, `ConfidentialOutstandingAmount` increases, and the amount lands in the holder's inbox. The first conversion registers the holder's encryption key and initializes the confidential fields. The issuer cannot convert.[^ct-convert]
 - `ConfidentialMPTMergeInbox` folds the inbox into the spending balance. Received confidential funds cannot be spent or converted back until merged.[^ct-merge]
 - `ConfidentialMPTSend` transfers between holders fully encrypted, without changing either holder's public `MPTAmount` or the issuance's `OutstandingAmount`. The issuance must have `lsfMPTCanTransfer`, and deposit authorization applies, including `CredentialIDs`.[^ct-send]
@@ -967,10 +989,10 @@ The `ConfidentialTransfer` amendment lets holders of an issuance with `lsfMPTCan
 
 Confidential holdings stay counted in `OutstandingAmount`, so `MPTokenIssuanceDestroy` keeps failing with `tecHAS_OBLIGATIONS` while confidential supply exists. `MPTokenAuthorize` with `tfMPTUnauthorize` fails with `tecHAS_OBLIGATIONS` while the issuance has confidential supply outstanding and the `MPToken` carries confidential fields. For non-issuer holders, spendable-balance computations count only the public `MPTAmount`, so confidential funds must be converted back before a regular Payment or DEX operation can move them.[^ct-interactions]
 
-[^ct-overview]: [`features.macro`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/detail/features.macro#L21), [`Protocol.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/Protocol.h#L489-L492), [`TER.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/TER.h#L133), [`TER.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/TER.h#L371), [`ConfidentialTransfer.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/protocol/ConfidentialTransfer.cpp#L332-L360), [`ConfidentialTransfer.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/protocol/ConfidentialTransfer.cpp#L365-L372)
-[^ct-convert]: [`ConfidentialMPTConvert.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/ConfidentialMPTConvert.cpp#L72-L326)
-[^ct-merge]: [`ConfidentialMPTMergeInbox.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/ConfidentialMPTMergeInbox.cpp#L40-L126)
-[^ct-send]: [`ConfidentialMPTSend.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/ConfidentialMPTSend.cpp#L153-L422)
-[^ct-convertback]: [`ConfidentialMPTConvertBack.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/ConfidentialMPTConvertBack.cpp#L141-L295)
-[^ct-clawback]: [`ConfidentialMPTClawback.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/ConfidentialMPTClawback.cpp#L53-L186)
-[^ct-interactions]: [`MPTokenIssuanceDestroy.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/MPTokenIssuanceDestroy.cpp#L21-L40), [`MPTokenAuthorize.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/MPTokenAuthorize.cpp#L86-L104), [`TokenHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/ledger/helpers/TokenHelpers.cpp#L430-L450)
+[^ct-overview]: [`features.macro`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/detail/features.macro#L21), [`Protocol.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/Protocol.h#L489-L492), [`TER.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/TER.h#L133), [`TER.h`](https://github.com/XRPLF/rippled/blob/3.3.0/include/xrpl/protocol/TER.h#L371), [`ConfidentialTransfer.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/protocol/ConfidentialTransfer.cpp#L362-L395), [`ConfidentialTransfer.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/protocol/ConfidentialTransfer.cpp#L400-L412)
+[^ct-convert]: [`ConfidentialMPTConvert.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/token/ConfidentialMPTConvert.cpp#L73-L366)
+[^ct-merge]: [`ConfidentialMPTMergeInbox.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/token/ConfidentialMPTMergeInbox.cpp#L41-L152)
+[^ct-send]: [`ConfidentialMPTSend.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/token/ConfidentialMPTSend.cpp#L161-L466)
+[^ct-convertback]: [`ConfidentialMPTConvertBack.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/token/ConfidentialMPTConvertBack.cpp#L149-L330)
+[^ct-clawback]: [`ConfidentialMPTClawback.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/token/ConfidentialMPTClawback.cpp#L54-L228)
+[^ct-interactions]: [`MPTokenIssuanceDestroy.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/MPTokenIssuanceDestroy.cpp#L21-L40), [`MPTokenAuthorize.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/token/MPTokenAuthorize.cpp#L90-L104), [`TokenHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/TokenHelpers.cpp#L439-L459)

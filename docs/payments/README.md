@@ -150,7 +150,7 @@ When `build_path` is `true`:
 
 **Static validation**[^static-validation]
 
-[^static-validation]: Static validation (preflight): [`checkExtraFeatures`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L86-L93), [`getFlagsMask`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L97-L109), [`preflight`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L113-L287)
+[^static-validation]: Static validation (preflight): [`checkExtraFeatures`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L86-L93), [`getFlagsMask`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L97-L109), [`preflight`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L113-L287)
 [^sponsor-created-account]: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L125-L138), [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L399-L423), [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L495-L521)
 
 The following preflight failure conditions apply. Cases that depend on a specific amendment are noted inline:
@@ -167,6 +167,7 @@ The following preflight failure conditions apply. Cases that depend on a specifi
 - `temMALFORMED`:
     - `sfCredentialIDs` array is empty or exceeds maximum size of 8. To leave credential IDs out, leave out the entire field.
     - `sfCredentialIDs` array contains duplicate credential IDs
+    - `sfCredentialIDs` array contains a credential ID of all zeros[^cred-zero-id]
     - `sfDomainID` is present but is all zeros. To omit the domain, leave out the entire field. Enforced under the `fixCleanup3_2_0` amendment.[^domainid-zero]
 - `temBAD_AMOUNT`:
     - `Amount` is not XRP and the `tfSponsorCreatedAccount` flag is set.
@@ -190,7 +191,7 @@ The following preflight failure conditions apply. Cases that depend on a specifi
 
 **Validation against the ledger view**[^preclaim-validation]
 
-[^preclaim-validation]: Validation against ledger view (preclaim): [`checkGranularSemantics`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L290-L356), [`preclaim`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L359-L469)
+[^preclaim-validation]: Validation against ledger view (preclaim): [`checkGranularSemantics`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L290-L375), [`preclaim`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L378-L518)
 [^isLegalNet-sendmax]: Both Amount and SendMax checked via isLegalNet: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L160)
 [^delivermin-checks]: DeliverMin checked for legal amount and positive value: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L247-L266)
 [^domainid-zero]: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L128-L132)
@@ -210,15 +211,23 @@ The following preflight failure conditions apply. Cases that depend on a specifi
     - Any credential ID in `sfCredentialIDs` doesn't exist in the ledger
     - Any credential doesn't belong to the source account
     - Any credential isn't accepted (missing `lsfAccepted` flag)
-- `tecNO_PERMISSION`: `DomainID` is present and either sending or receiving account is not in Domain (not the domain owner and does not hold a valid, non-expired accepted credential).
+- `tecNO_PERMISSION`: `DomainID` is present and the domain does not exist, or the sending or receiving account is not the domain owner and holds no credential matching an entry in the domain's `AcceptedCredentials` that is either accepted and unexpired, or expired (an expired one leads to `tecEXPIRED` below).[^domain-expired]
 - `terNO_DELEGATE_PERMISSION`: Transaction specifies a delegate but:
     - The delegate authorization doesn't exist in the ledger
     - The delegate doesn't have transaction-level permission for Payment
     - For granular permissions (`PaymentMint`/`PaymentBurn`, `PermissionDelegationV1_1` amendment): the transaction carries a field or flag outside the granular templates (for example `DeliverMin`, `DomainID`, `Paths`, or any non-universal flag), or `SendMax` names a different asset than `Amount`, or `Amount` is XRP
-    - For granular permissions with an IOU `Amount`: the issuer is not one of the two endpoints, or the trust line between source and destination does not exist, or `PaymentMint` is held but the payment redeems (the destination's trust limit is not positive or the source currently holds the destination's IOUs), or `PaymentBurn` is held but the source is not currently the holder
+    - For granular permissions with an IOU `Amount`: the issuer is not one of the two endpoints, or the trust line between source and destination does not exist, or `PaymentMint` is held but the payment redeems (the destination's trust limit is not positive or the source currently holds the destination's IOUs), or `PaymentBurn` is held but the source is not currently the holder, or `PaymentBurn` is held and `Amount` exceeds the balance the source holds. Paying more would take the balance past zero and issue new IOUs, which is minting, so it needs the same authorization as a mint: `PaymentMint` and a positive destination trust limit toward the source[^burn-cap]
     - For granular permissions with an MPT `Amount`: `PaymentMint` requires the source to be the MPT issuer and `PaymentBurn` requires the destination to be the MPT issuer
 
 **Validation during doApply**
+
+**Domain Payments:**
+
+- `tecEXPIRED`: `DomainID` is present and the sender or destination, other than the domain owner, has an expired matching credential but no accepted, unexpired one left after its expired ones are deleted. Both accounts are checked before the error is returned. The deletions still apply (see [State Changes](#312-state-changes)).[^domain-expired]
+
+[^domain-expired]: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L478-L515), [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L523-L546), [`CredentialHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L208-L246), [`CredentialHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L334-L368), [`CredentialHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L48-L125), [`Transactor.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/Transactor.cpp#L1450-L1527)
+[^cred-zero-id]: [`CredentialHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/CredentialHelpers.cpp#L144-L149)
+[^burn-cap]: [`Payment.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/payment/Payment.cpp#L342-L373)
 
 **Direct XRP Payments:**[^direct-xrp-payment]
 
@@ -244,6 +253,11 @@ The following preflight failure conditions apply. Cases that depend on a specifi
 - `tecPATH_PARTIAL`: `DeliverMin` was specified and the delivered amount is less than `DeliverMin`
 
 ### 3.1.2. State Changes
+
+**Domain Payments:**
+
+- `Credential` objects are **deleted**:
+    - When `DomainID` is present, the expired credentials of the sender and destination that match the domain's `AcceptedCredentials` are deleted. The domain owner is exempt. This lowers the reserve required of each credential's owner. See [Credential Verification](../permissioned_domains/README.md#42-credential-verification).[^domain-expired]
 
 **XRP Payments:**
 
@@ -322,17 +336,11 @@ The Payment transaction determines which path to take during the `doApply` phase
 
 ## 4.1. Direct XRP Payment Execution
 
-Direct XRP payments are the simplest payment type, transferring XRP directly from one account to another without any intermediate steps or currency conversion. The execution varies based on whether the destination account exists.
-
-**When the destination account exists**: The payment decreases the source account's `Balance` by the payment amount and increases the destination account's `Balance` by the same amount. If the destination account has the `lsfPasswordSpent` flag set, it is cleared to allow another free `SetRegularKey` transaction.
-
-**When the destination account does not exist**: A new `AccountRoot` entry is created for the destination with the payment amount as its initial balance. The account's `Sequence` is set to the current ledger sequence. The payment must meet the base reserve requirement (see [Reserves](#213-reserves)), or it fails with `tecNO_DST_INSUF_XRP`. With `tfSponsorCreatedAccount` (`Sponsor` amendment), the base reserve requirement is waived: any positive amount creates the account, the source is recorded as its sponsor, and the source's reserve requirement grows by one base reserve.
-
-All validation checks are performed before execution, including reserve requirements, deposit authorization, and destination tags. See [Failure Conditions](#311-failure-conditions) for complete validation rules.
+Direct XRP payments move XRP from the source to the destination with no intermediate steps. If the destination account does not exist, the payment creates it. See [Reserves](#213-reserves) for the minimum amount, and [State Changes](#312-state-changes) for the exact changes.
 
 ## 4.2. Cross-Currency Payment Execution
 
-Cross-currency payments convert one currency to another through intermediary steps, leveraging MPTs, trust lines, order books, and AMM liquidity. These payments are executed when the payment specifies `SendMax`, includes `Paths`, or has a non-XRP `Amount` (an IOU, or an MPT when the MPTokensV2 amendment is enabled).
+Cross-currency payments convert one currency to another through intermediary steps, leveraging MPTs, trust lines, order books, and AMM liquidity.
 
 Cross-currency payment execution involves two complementary components: path finding and flow execution.
 

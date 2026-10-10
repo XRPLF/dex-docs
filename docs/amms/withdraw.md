@@ -1,8 +1,8 @@
 # Index
 
 - [1. Introduction](#1-introduction)
-- [2. applyGuts](#2-applyguts)
-  - [2.1. applyGuts Pseudo-Code](#21-applyguts-pseudo-code)
+- [2. Withdraw Logic](#2-withdraw-logic)
+  - [2.1. Pseudo-Code](#21-pseudo-code)
 - [3. getTradingFee](#3-gettradingfee)
 - [4. Multi-Asset Withdrawal Modes](#4-multi-asset-withdrawal-modes)
   - [4.1. equalWithdrawTokens (tfLPToken, tfWithdrawAll)](#41-equalwithdrawtokens-tflptoken-tfwithdrawall)
@@ -30,144 +30,68 @@ The [AMM documentation](README.md#33-ammwithdraw-transaction) describes the high
 Throughout the document we refer to equations by their number in the [XLS-30 specification](https://github.com/XRPLF/XRPL-Standards/tree/master/XLS-0030-automated-market-maker).
 AMM helpers use **token** as a subject in many function names. This refers to any supported currency in the system, not only a particular token implementation, like trust lines or MPTs.
 
-# 2. applyGuts
+# 2. Withdraw Logic
 
-The `applyGuts` function[^applyGuts] is the main entry point for processing AMMWithdraw transactions. It retrieves the AMM ledger entry and the withdrawer's LP token balance, determines how many LP tokens to redeem (all tokens for `tfWithdrawAll`/`tfOneAssetWithdrawAll`, or the specified amount from `LPTokenIn`), then adjusts the LP token balance for precision if needed. The function gets the current pool balances and determines which trading fee applies to the withdrawer (regular or discounted for [auction slot holders](#3-gettradingfee)). Based on the transaction flags and provided fields, it dispatches to one of five withdrawal mode handlers (implementing seven total modes): two [multi-asset modes](#4-multi-asset-withdrawal-modes) that maintain proportional withdrawals, and three [single-asset modes](#5-single-asset-withdrawal-modes) that perform single-sided withdrawals. Each mode handler calculates the withdrawal amounts and LP tokens to burn, then calls the [common withdraw function](#6-common-withdraw-function) to execute the actual asset transfers and update the pool state. After the withdrawal, if the pool is empty (zero LP tokens), the function attempts to delete the AMM account - if successful, the AMM is fully removed; if incomplete due to remaining trust lines, the AMM remains in an empty state with the LP token balance set to zero.
+The `applyGuts` function[^applyGuts] is the main entry point for processing AMMWithdraw transactions. It retrieves the AMM ledger entry and the withdrawer's LP token balance, determines how many LP tokens to redeem (all tokens for `tfWithdrawAll`/`tfOneAssetWithdrawAll`, or `LPTokenIn` for the modes that take it), then adjusts the LP token balance for precision if needed. The function gets the current pool balances and determines which trading fee applies to the withdrawer (regular or discounted for [auction slot holders](#3-gettradingfee)). Based on the transaction flags and provided fields, it dispatches to one of five withdrawal mode handlers (implementing seven total modes): two [multi-asset modes](#4-multi-asset-withdrawal-modes) that maintain proportional withdrawals, and three [single-asset modes](#5-single-asset-withdrawal-modes) that perform single-sided withdrawals. Each mode handler calculates the withdrawal amounts and LP tokens to burn, then calls the [common withdraw function](#6-common-withdraw-function) to execute the actual asset transfers and update the pool state. After the withdrawal, if the pool is empty (zero LP tokens), the function attempts to delete the AMM account - if successful, the AMM is fully removed; if incomplete due to remaining trust lines, the AMM remains in an empty state with the LP token balance set to zero.
 
-Under the `fixCleanup3_3_0` amendment, the freeze rules relax as described in the [failure conditions](README.md#332-failure-conditions). In this path, an issuer withdrawing its own frozen token reads the pool balances with `IgnoreFreeze` instead of the `ZeroIfFrozen` shown in the pseudo-code below.
+Under the `fixCleanup3_3_0` amendment, the freeze rules relax as described in the [failure conditions](README.md#332-failure-conditions).
 
-[^applyGuts]: AMMWithdraw::applyGuts: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L336-L462)
+Under the `fixCleanup3_4_0` amendment, the mode dispatch is wrapped in the same guard as in [deposit](deposit.md#2-deposit-logic). This one is defense in depth: no known withdrawal path can produce an out-of-range amount, since `preclaim` bounds requested amounts by the pool balances.
 
-## 2.1. applyGuts Pseudo-Code
+[^applyGuts]: AMMWithdraw::applyGuts: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L337-L486)
+
+## 2.1. Pseudo-Code
 
 ```python
-def applyGuts(sb: &Sandbox, tx: Transaction):
-    amount = tx[~sfAmount]
-    amount2 = tx[~sfAmount2]
-    ePrice = tx[~sfEPrice]
-    ammSle = sb.getAMM(tx[sfAsset], tx[sfAsset2])
-    if not ammSle:
-        return (tecINTERNAL, False)
-
-    ammAccountID = ammSle[sfAccount]
-
-    # Get withdrawer's LP token balance
-    lpTokens = ammLPHolds(view, ammSle, accountID_)
-
-    # Determine LP tokens to withdraw
-    # For tfWithdrawAll and tfOneAssetWithdrawAll: use all LP tokens
-    # Otherwise: use tx[sfLPTokenIn]
-    lpTokensWithdraw = tokensWithdraw(lpTokens, tx[~sfLPTokenIn], tx.getFlags())
-
-    # Adjust LP token balance for precision (with fixAMMv1_1)
-    # This handles rounding issues for the last LP
-    if rules.enabled(fixAMMv1_1):
-        if not verifyAndAdjustLPTokenBalance(sb, lpTokens, ammSle, accountID_):
-            return (tecAMM_INVALID_TOKENS, False)
-
-    # Get current trading fee (with potential discount)
-    tfee = getTradingFee(view, ammSle, accountID_)
-
-    # Get current pool balances
-    # FreezeHandling.ZeroIfFrozen: treat frozen assets as having zero balance
-    # AuthHandling.ZeroIfUnauthorized: treat unauthorized MPT holders as having zero balance
-    currentBalances = ammHolds(sb, ammSle, amount.asset(), amount2.asset(), FreezeHandling.ZeroIfFrozen, AuthHandling.ZeroIfUnauthorized)
-    if not currentBalances:
-        return (currentBalances.error(), False)
-
-    amountBalance, amount2Balance, lptAMMBalance = currentBalances
-
-    subTxType = tx.getFlags() & tfWithdrawSubTx
-
-    # Dispatch to appropriate withdrawal mode handler
-    # Returns (result_code, new_lp_token_balance)
-    if subTxType & tfTwoAsset:
-        # Proportional withdrawal with max constraints on both assets
-        result, newLPTokenBalance = equalWithdrawLimit(
-            sb,
-            ammSle,
-            ammAccountID,
-            amountBalance,
-            amount2Balance,
-            lptAMMBalance,
-            amount,              # max amount1 to withdraw
-            amount2,             # max amount2 to withdraw
-            tfee
-        )
-
-    elif subTxType & (tfOneAssetLPToken | tfOneAssetWithdrawAll):
-        # Single asset withdrawal for specified LP tokens
-        result, newLPTokenBalance = singleWithdrawTokens(
-            sb,
-            ammSle,
-            ammAccountID,
-            amountBalance,
-            lptAMMBalance,
-            amount,              # min amount or asset specifier
-            lpTokensWithdraw,    # LP tokens to redeem
-            tfee
-        )
-
-    elif subTxType & tfLimitLPToken:
-        # Single asset withdrawal with effective price constraint
-        result, newLPTokenBalance = singleWithdrawEPrice(
-            sb,
-            ammSle,
-            ammAccountID,
-            amountBalance,
-            lptAMMBalance,
-            amount,              # min amount
-            ePrice,              # min effective price
-            tfee
-        )
-
-    elif subTxType & tfSingleAsset:
-        # Single asset withdrawal for specified amount
-        result, newLPTokenBalance = singleWithdraw(
-            sb,
-            ammSle,
-            ammAccountID,
-            amountBalance,
-            lptAMMBalance,
-            amount,              # amount to withdraw
-            tfee
-        )
-
-    elif subTxType & (tfLPToken | tfWithdrawAll):
-        # Proportional withdrawal for LP tokens
-        result, newLPTokenBalance = equalWithdrawTokens(
-            sb,
-            ammSle,
-            ammAccountID,
-            amountBalance,
-            amount2Balance,
-            lptAMMBalance,
-            lpTokens,
-            lpTokensWithdraw,    # LP tokens to redeem
-            tfee
-        )
-
+def withdraw_from_pool(pool, withdrawer, tx):
+    held = pool.lp_tokens_of(withdrawer)
+    if tx.flags & (tfWithdrawAll | tfOneAssetWithdrawAll):
+        lp_tokens_in = held
     else:
-        # Should not happen (validated in preflight)
-        return (tecINTERNAL, False)
+        lp_tokens_in = tx.LPTokenIn  # absent for the modes that work it out
 
-    if result != tesSUCCESS:
-        return (result, False)
+    # Rounding can leave the last LP's tokens slightly off the pool's LP token supply
+    if pool.is_only_lp(withdrawer):
+        if not within_relative_distance(held, pool.lp_token_supply, 0.001):
+            fail(tecAMM_INVALID_TOKENS)
+        pool.lp_token_supply = held
 
-    # Delete AMM if empty, or update LP token balance
-    res = deleteAMMAccountIfEmpty(
-        sb,
-        ammSle,
-        newLPTokenBalance,
-        tx[sfAsset],
-        tx[sfAsset2],
-        journal
-    )
+    fee = getTradingFee(pool, withdrawer)
 
-    if not res.second:
-        return (res.first, False)
+    # Frozen reserves and MPTs the AMM may not hold read as zero. When the withdrawer
+    # issues either pool asset, both reserves are read through the freeze, because
+    # an issuer can always receive its own token.
+    balance1, balance2, lp_supply = pool.balances(
+        tx.Amount, tx.Amount2,
+        ignore_freeze=withdrawer in (pool.Asset.issuer, pool.Asset2.issuer))
 
-    return (tesSUCCESS, True)
+    withdraw_mode = {
+        tfLPToken: equalWithdrawTokens,
+        tfWithdrawAll: equalWithdrawTokens,
+        tfTwoAsset: equalWithdrawLimit,
+        tfSingleAsset: singleWithdraw,
+        tfOneAssetLPToken: singleWithdrawTokens,
+        tfOneAssetWithdrawAll: singleWithdrawTokens,
+        tfLimitLPToken: singleWithdrawEPrice,
+    }[tx.withdraw_mode_flag]
+
+    try:
+        new_lp_supply = withdraw_mode(pool, balance1, balance2, lp_supply, lp_tokens_in, tx, fee)
+    except AmountOutOfRange:
+        if fixCleanup3_4_0:
+            fail(tecAMM_FAILED)
+        fail(tefEXCEPTION)
+
+    # The remaining LP tokens must not exceed the geometric mean of the pool's actual reserves
+    pool_mean = sqrt(pool.reserve1 * pool.reserve2)
+    if (new_lp_supply > pool_mean
+            and not within_relative_distance(pool_mean, new_lp_supply, 1e-11)):
+        fail(tecPRECISION_LOSS)
+
+    pool.lp_token_supply = new_lp_supply
+    if new_lp_supply == 0:
+        # Deletes what it can. With too many trust lines, the empty AMM stays for AMMDelete.
+        pool.delete()
 ```
 
 # 3. getTradingFee
@@ -179,19 +103,19 @@ Determines the trading fee for the withdrawer, accounting for auction slot disco
 Multi-asset withdrawal modes maintain proportional withdrawals by removing both pool assets simultaneously. This preserves the pool's price (asset ratio) while decreasing liquidity. Since these withdrawals maintain proportional ratios, they incur no trading fees.
 
 The modes are:
-- **[equalWithdrawTokens](#41-equalwithdrawtokens-tflptoken-tfwithdrawall) (tfLPToken, tfWithdrawAll)** - Redeem exact LP tokens or all LP tokens, receive proportional amounts of both assets
+- **[equalWithdrawTokens](#41-equalwithdrawtokens-tflptoken-tfwithdrawall) (tfLPToken, tfWithdrawAll)** - Redeem LP tokens or all LP tokens, receive proportional amounts of both assets
 - **[equalWithdrawLimit](#42-equalwithdrawlimit-tftwoasset) (tfTwoAsset)** - Specify maximum amounts for both assets, system calculates LP tokens to burn
 
 ## 4.1. equalWithdrawTokens (tfLPToken, tfWithdrawAll)
 
-> "I want to redeem exactly X LP tokens, how much of both assets do I get?" (tfLPToken)
+> "I want to redeem X LP tokens, how much of both assets do I get?" (tfLPToken)
 > "Redeem all my LP tokens for both assets." (tfWithdrawAll)
 
 Proportional withdrawal of pool assets for the amount of LP tokens.[^equalWithdrawTokens]
 
-[^equalWithdrawTokens]: AMMWithdraw::equalWithdrawTokens: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L790-L871)
+[^equalWithdrawTokens]: AMMWithdraw::equalWithdrawTokens: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L903-L990)
 
-This function handles two related modes. With `tfLPToken`, the user specifies the exact number of LP tokens to redeem using `LPTokenIn`, and the function calculates the proportional amounts of both assets to withdraw. With `tfWithdrawAll`, the user redeems their entire LP token balance without specifying an amount. The function handles a special case when withdrawing all LP tokens from the pool (`lpTokensWithdraw == lptAMMBalance`), which empties the pool completely. For partial withdrawals, it calculates the pool fraction (`frac = tokensAdj / lptAMMBalance`), then multiplies each asset balance by this fraction, rounding down with [`getRoundedAsset`](helpers.md#23-getroundedasset) to ensure the pool retains sufficient assets.
+This function handles two related modes. With `tfLPToken`, the user requests a number of LP tokens using `LPTokenIn`. For a partial withdrawal, the amount redeemed can be rounded down slightly for precision. The function calculates the proportional amounts of both assets to withdraw. With `tfWithdrawAll`, the user redeems their entire LP token balance without specifying an amount. The function handles a special case when withdrawing all LP tokens from the pool (`lpTokensWithdraw == lptAMMBalance`), which empties the pool completely. For partial withdrawals, it calculates the pool fraction (`frac = tokensAdj / lptAMMBalance`), then multiplies each asset balance by this fraction, rounding down with [`getRoundedAsset`](helpers.md#23-getroundedasset) to ensure the pool retains sufficient assets.
 
 **Example:**
 
@@ -203,7 +127,7 @@ A pool has 150 USD, 150 EUR, and 150 LP tokens outstanding. Bob holds 30 LP toke
 - USD withdrawn: 150 * 0.1 = 15 USD
 - EUR withdrawn: 150 * 0.1 = 15 EUR
 - Result: Bob redeems 15 LP tokens, receives 15 USD + 15 EUR
-- Bob now holds: 15 LP tokens (10% of remaining pool)
+- Bob now holds: 15 LP tokens (10% of the original 150, or 1/9 of the remaining 135)
 
 **Case 2: Bob redeems all his LP tokens (tfWithdrawAll)**
 - LP tokens to redeem: 30 (all Bob's holdings)
@@ -216,78 +140,23 @@ A pool has 150 USD, 150 EUR, and 150 LP tokens outstanding. Bob holds 30 LP toke
 ### 4.1.1 equalWithdrawTokens Pseudo-Code
 
 ```python
-def equalWithdrawTokens(
-        view,                 # Ledger view (sandbox)
-        ammSle,               # AMM ledger entry
-        account,              # Withdrawer account ID
-        ammAccount,           # AMM pseudo-account ID
-        amountBalance,        # Current pool balance of asset1
-        amount2Balance,       # Current pool balance of asset2
-        lptAMMBalance,        # Total outstanding LP tokens
-        lpTokens,             # Withdrawer's LP token balance
-        lpTokensWithdraw,     # LP tokens to redeem
-        tfee,                 # Trading fee (not used for proportional)
-        freezeHandling,       # How to handle frozen assets
-        withdrawAll,          # Whether this is tfWithdrawAll
-        priorBalance,         # Withdrawer's prior XRP balance
-        journal):             # Debug journal
-    # CASE 1: Withdrawing all LP tokens in the pool
-    if lpTokensWithdraw == lptAMMBalance:
-        # Withdraw all assets, empty the pool
-        return withdraw(
-            view,
-            ammSle,
-            ammAccount,
-            account,
-            amountBalance,
-            amountBalance,       # withdraw all of asset1
-            amount2Balance,      # withdraw all of asset2
-            lptAMMBalance,
-            lpTokensWithdraw,
-            tfee,
-            freezeHandling,
-            WithdrawAll=True,    # special handling for complete withdrawal
-            priorBalance,
-            journal
-        )
+def equalWithdrawTokens(pool, balance1, balance2, lp_supply, lp_tokens_in, tx, fee):
+    if lp_tokens_in == lp_supply:
+        return withdraw(pool, balance1, balance2, lp_tokens_in, withdraw_all=True)
 
-    # CASE 2: Partial withdrawal
-    # Adjust LP tokens for precision (with fixAMMv1_3)
-    tokensAdj = adjustLPTokensIn(rules, lptAMMBalance, lpTokensWithdraw, withdrawAll) # helpers.md#25-adjustlptokensin-withdrawals
+    withdraw_all = tx.flags & tfWithdrawAll
+    lp_tokens = lp_tokens_in if withdraw_all else adjustLPTokensIn(lp_supply, lp_tokens_in)
+    if lp_tokens == 0:
+        fail(tecAMM_INVALID_TOKENS)
 
-    if rules.enabled(fixAMMv1_3) and tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, STAmount{}, STAmount{}, None)
+    share = lp_tokens / lp_supply
+    amount1 = getRoundedAsset(balance1, share, IsDeposit=False)
+    amount2 = getRoundedAsset(balance2, share, IsDeposit=False)
+    # With too few LP tokens, one side rounds to zero and the withdrawal would take only the other asset
+    if amount1 == 0 or amount2 == 0:
+        fail(tecAMM_FAILED)
 
-    # Calculate the fraction of the pool being withdrawn
-    # Example: 5,000 LP tokens / 50,000 total = 0.1 (10% of pool)
-    frac = tokensAdj / lptAMMBalance
-
-    # Calculate withdrawal amounts for both assets
-    # With fixAMMv1_3: Round DOWN (conservative, ensures pool keeps enough)
-    amountWithdraw = getRoundedAsset(rules, amountBalance, frac, IsDeposit=False) # helpers.md#231-getroundedasset-simple-pseudo-code
-    amount2Withdraw = getRoundedAsset(rules, amount2Balance, frac, IsDeposit=False) # helpers.md#231-getroundedasset-simple-pseudo-code
-
-    # Prevent one-sided pool withdrawal due to rounding
-    # If either amount rounds to zero, fail so user withdraws more tokens
-    if amountWithdraw == 0 or amount2Withdraw == 0:
-        return (tecAMM_FAILED, STAmount{}, STAmount{}, STAmount{})
-
-    return withdraw(
-        view,
-        ammSle,
-        ammAccount,
-        account,
-        amountBalance,
-        amountWithdraw,
-        amount2Withdraw,
-        lptAMMBalance,
-        tokensAdj,
-        tfee,
-        freezeHandling,
-        withdrawAll,
-        priorBalance,
-        journal
-    )
+    return withdraw(pool, amount1, amount2, lp_tokens, withdraw_all=withdraw_all)
 ```
 
 ## 4.2. equalWithdrawLimit (tfTwoAsset)
@@ -318,88 +187,24 @@ There is an AMM with 100 USD and 100 EUR (1:1 ratio), 100 LP tokens outstanding.
 ### 4.2.1 equalWithdrawLimit Pseudo-Code
 
 ```python
-def equalWithdrawLimit(
-        view,                 # Ledger view (sandbox)
-        ammSle,               # AMM ledger entry
-        ammAccount,           # AMM pseudo-account ID
-        amountBalance,        # Current pool balance of asset1
-        amount2Balance,       # Current pool balance of asset2
-        lptAMMBalance,        # Total outstanding LP tokens
-        amount,               # User's max amount1 to withdraw
-        amount2,              # User's max amount2 to withdraw
-        tfee):                # Trading fee (not used for proportional)
-    # STRATEGY 1: Try using all of amount (asset1)
-    # Calculate what fraction of the pool this represents
-    frac = amount / amountBalance
+def equalWithdrawLimit(pool, balance1, balance2, lp_supply, lp_tokens_in, tx, fee):
+    def take_all_of(amount, balance, other_balance):
+        share = amount / balance
+        lp_tokens = getRoundedLPTokens(lp_supply, share, IsDeposit=False)
+        if lp_tokens == 0:
+            fail(tecAMM_INVALID_TOKENS)
+        share = adjustFracByTokens(lp_supply, lp_tokens, share)  # the share the rounded LP tokens redeem
+        return lp_tokens, getRoundedAsset(other_balance, share, IsDeposit=False)
 
-    # Calculate LP tokens for this fraction
-    # Using simple version of getRoundedLPTokens (direct fraction)
-    tokensAdj = getRoundedLPTokens(rules, lptAMMBalance, frac, IsDeposit=False) # helpers.md#211-getroundedlptokens-simple-pseudo-code
+    lp_tokens, amount2 = take_all_of(tx.Amount, balance1, balance2)
+    if amount2 <= tx.Amount2:
+        return withdraw(pool, tx.Amount, amount2, lp_tokens)
 
-    if rules.enabled(fixAMMv1_3) and tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, STAmount{})
+    lp_tokens, amount1 = take_all_of(tx.Amount2, balance2, balance1)
+    if amount1 <= tx.Amount:
+        return withdraw(pool, amount1, tx.Amount2, lp_tokens)
 
-    # Adjust fraction based on rounded tokens (for precision consistency)
-    frac = adjustFracByTokens(rules, lptAMMBalance, tokensAdj, frac)
-
-    # Calculate how much asset2 would be withdrawn for this fraction
-    # Using simple version of getRoundedAsset (direct fraction)
-    amount2Withdraw = getRoundedAsset(rules, amount2Balance, frac, IsDeposit=False) # helpers.md#231-getroundedasset-simple-pseudo-code
-
-    # Check if calculated amount2 fits within user's max constraint
-    if amount2Withdraw <= amount2:
-        # Success! Use all of amount, calculated amount2Withdraw
-        return withdraw(
-            view,
-            ammSle,
-            ammAccount,
-            amountBalance,
-            amount,              # withdraw all of asset1
-            amount2Withdraw,     # calculated asset2
-            lptAMMBalance,
-            tokensAdj,
-            tfee
-        )
-
-    # STRATEGY 2: Strategy 1 failed, try using all of amount2
-    # Calculate what fraction of the pool amount2 represents
-    frac = amount2 / amount2Balance
-
-    # Calculate how much asset1 would be withdrawn for this fraction (preliminary)
-    # Using simple version of getRoundedAsset (direct fraction)
-    amountWithdraw = getRoundedAsset(rules, amountBalance, frac, IsDeposit=False) # helpers.md#231-getroundedasset-simple-pseudo-code
-
-    # Calculate LP tokens for this fraction
-    # Using simple version of getRoundedLPTokens (direct fraction)
-    tokensAdj = getRoundedLPTokens(rules, lptAMMBalance, frac, IsDeposit=False) # helpers.md#211-getroundedlptokens-simple-pseudo-code
-
-    if rules.enabled(fixAMMv1_3) and tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, STAmount{})
-
-    # Adjust fraction based on rounded tokens (for precision consistency)
-    frac = adjustFracByTokens(rules, lptAMMBalance, tokensAdj, frac)
-
-    # Recalculate asset1 amount with adjusted fraction
-    # Using simple version of getRoundedAsset (direct fraction)
-    amountWithdraw = getRoundedAsset(rules, amountBalance, frac, IsDeposit=False) # helpers.md#231-getroundedasset-simple-pseudo-code
-
-    # Check if calculated amount fits within user's max constraint
-    if rules.enabled(fixAMMv1_3):
-        if amountWithdraw > amount:
-            return (tecAMM_FAILED, STAmount{})
-
-    # Success! Use calculated amountWithdraw, all of amount2
-    return withdraw(
-        view,
-        ammSle,
-        ammAccount,
-        amountBalance,
-        amountWithdraw,      # calculated asset1
-        amount2,             # withdraw all of asset2
-        lptAMMBalance,
-        tokensAdj,
-        tfee
-    )
+    fail(tecAMM_FAILED)
 ```
 
 # 5. Single-Asset Withdrawal Modes
@@ -407,113 +212,61 @@ def equalWithdrawLimit(
 Single-asset withdrawal modes allow users to withdraw only one asset instead of both assets proportionally. Unlike [multi-asset withdrawals](#4-multi-asset-withdrawal-modes) that maintain the pool ratio, single-asset withdrawals change the pool composition. Because they alter the pool ratio, [trading fees](#3-gettradingfee) apply to single-asset withdrawals. There are three modes:
 
 - **[singleWithdraw](#51-singlewithdraw-tfsingleasset) (tfSingleAsset)** - User specifies withdrawal amount, system calculates LP tokens to redeem
-- **[singleWithdrawTokens](#52-singlewithdrawtokens-tfoneassetlptoken-tfoneassetwithdrawall) (tfOneAssetLPToken, tfOneAssetWithdrawAll)** - User specifies exact LP tokens to redeem or all LP tokens, withdraws calculated amount of single asset
+- **[singleWithdrawTokens](#52-singlewithdrawtokens-tfoneassetlptoken-tfoneassetwithdrawall) (tfOneAssetLPToken, tfOneAssetWithdrawAll)** - User specifies LP tokens to redeem or all LP tokens, withdraws calculated amount of single asset
 - **[singleWithdrawEPrice](#53-singlewithdraweprice-tflimitlptoken) (tfLimitLPToken)** - User specifies minimum effective price limit
 
 ## 5.1. singleWithdraw (tfSingleAsset)
 
 > "I want to withdraw X amount, how many LP tokens must I redeem?"
 
-The user specifies `Amount` (the asset amount to withdraw) and the function calculates how many LP tokens must be redeemed.[^singleWithdraw] Since this is a single-asset withdrawal that changes the pool ratio, a [trading fee](#3-gettradingfee) applies. The function uses [`lpTokensIn`](helpers.md#331-lptokensin-equation-7) (Equation 7) to calculate the LP tokens based on the withdrawal amount and trading fee, then adjusts the result for precision with [`adjustLPTokensIn`](helpers.md#25-adjustlptokensin-withdrawals). The adjusted tokens are passed to `adjustAssetOutByTokens` to recalculate the withdrawal amount, ensuring the reverse calculation produces consistent results and doesn't underpay the user due to rounding.
+The user specifies `Amount` (the asset amount to withdraw) and the function calculates how many LP tokens must be redeemed.[^singleWithdraw] Since this is a single-asset withdrawal that changes the pool ratio, a [trading fee](#3-gettradingfee) applies. The function uses [`lpTokensIn`](helpers.md#331-lptokensin-equation-7) (Equation 7) to calculate the LP tokens based on the withdrawal amount and trading fee, then adjusts the result for precision with [`adjustLPTokensIn`](helpers.md#25-adjustlptokensin-withdrawals). The adjusted tokens are passed to `adjustAssetOutByTokens`, which prices them in the withdrawn asset. If the result exceeds `Amount`, it recomputes the LP tokens from a smaller target amount. The withdrawal is capped at `Amount`.
 
 [^singleWithdraw]: AMMWithdraw::singleWithdraw: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L969-L1007)
 
 ### 5.1.1. singleWithdraw Pseudo-Code
 
 ```python
-def singleWithdraw(
-        view,              # Ledger view (sandbox)
-        ammSle,            # AMM ledger entry
-        ammAccount,        # AMM pseudo-account ID
-        amountBalance,     # Current pool balance of the asset
-        lptAMMBalance,     # Total outstanding LP tokens
-        amount,            # Amount to withdraw
-        tfee):             # Trading fee (for single-asset withdrawal)
-    # Calculate LP tokens using the single-asset withdrawal formula
-    # lpTokensIn solves: "How many LP tokens to redeem to get `amount` assets?"
-    tokens = lpTokensIn(amountBalance, amount, lptAMMBalance, tfee) # helpers.md#331-lptokensin-equation-7
+def singleWithdraw(pool, balance1, balance2, lp_supply, lp_tokens_in, tx, fee):
+    lp_tokens = adjustLPTokensIn(lp_supply, lpTokensIn(balance1, tx.Amount, lp_supply, fee))
+    if lp_tokens == 0:
+        fail(tecAMM_INVALID_TOKENS)
 
-    # Adjust LP tokens for precision (with fixAMMv1_3)
-    tokensAdj = adjustLPTokensIn(rules, lptAMMBalance, tokens, isWithdrawAll(tx)) # helpers.md#25-adjustlptokensin-withdrawals
+    # If rounding makes these LP tokens worth more than Amount, they are recomputed
+    # from a smaller amount, and the withdrawal is capped at Amount
+    lp_tokens, amount = adjustAssetOutByTokens(balance1, tx.Amount, lp_supply, lp_tokens, fee)
+    if lp_tokens == 0:
+        fail(tecAMM_INVALID_TOKENS)
 
-    if tokensAdj == 0:
-        if not rules.enabled(fixAMMv1_3):
-            return (tecAMM_FAILED, STAmount{})
-        else:
-            return (tecAMM_INVALID_TOKENS, STAmount{})
-
-    # Adjust withdrawal amount based on adjusted tokens
-    # This ensures the reverse calculation produces consistent results
-    tokensAdj, amountWithdrawAdj = adjustAssetOutByTokens(
-        rules, amountBalance, amount, lptAMMBalance, tokensAdj, tfee)
-
-    if rules.enabled(fixAMMv1_3) and tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, STAmount{})
-
-    return withdraw(
-        view,
-        ammSle,
-        ammAccount,
-        amountBalance,
-        amountWithdrawAdj,   # adjusted: actual amount to withdraw
-        None,                # single-asset withdrawal (no asset2)
-        lptAMMBalance,
-        tokensAdj,           # calculated: LP tokens to redeem
-        tfee
-    )
+    return withdraw(pool, amount, None, lp_tokens)
 ```
 
 ## 5.2. singleWithdrawTokens (tfOneAssetLPToken, tfOneAssetWithdrawAll)
 
-> "I'll redeem exactly X LP tokens, how much asset (single asset only) do I get?" (tfOneAssetLPToken)
+> "I'll redeem X LP tokens, how much asset (single asset only) do I get?" (tfOneAssetLPToken)
 > "Redeem all my LP tokens for a single asset." (tfOneAssetWithdrawAll)
 
 Withdraw a single asset by redeeming specified LP tokens.[^singleWithdrawTokens]
 
 [^singleWithdrawTokens]: AMMWithdraw::singleWithdrawTokens: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L1020-L1051)
 
-This function handles the reverse calculation from [`singleWithdraw`](#51-singlewithdraw-tfsingleasset): the user specifies the exact number of LP tokens to redeem (using `LPTokenIn` for tfOneAssetLPToken, or all LP tokens for tfOneAssetWithdrawAll), and the function calculates the withdrawal amount of a single asset. The user can provide `Amount` as a minimum constraint on how much they expect to receive.
+This function handles the reverse calculation from [`singleWithdraw`](#51-singlewithdraw-tfsingleasset). The user names the LP tokens to redeem: `LPTokenIn` for tfOneAssetLPToken, or all their LP tokens for tfOneAssetWithdrawAll. The function calculates how much of a single asset they receive. `Amount` names that asset. When it is not zero, it is also the minimum the user accepts.
 
-The function first adjusts the LP tokens for precision using [`adjustLPTokensIn`](helpers.md#25-adjustlptokensin-withdrawals), then uses [`ammAssetOut`](helpers.md#332-ammassetout-equation-8) (Equation 8) to calculate the withdrawal amount by solving the inverse single-asset withdrawal problem. If the calculated amount is less than the user's `Amount` constraint (when non-zero), the transaction fails with `tecAMM_FAILED`.
+For tfOneAssetLPToken, the function first rounds the LP tokens down for precision using [`adjustLPTokensIn`](helpers.md#25-adjustlptokensin-withdrawals), so it can redeem slightly fewer than `LPTokenIn`. It then uses [`ammAssetOut`](helpers.md#332-ammassetout-equation-8) (Equation 8) to calculate the withdrawal amount by solving the inverse single-asset withdrawal problem. If the calculated amount is less than the user's `Amount` constraint (when non-zero), the transaction fails with `tecAMM_FAILED`.
 
 ### 5.2.1. singleWithdrawTokens Pseudo-Code
 
 ```python
-def singleWithdrawTokens(
-        view,              # Ledger view (sandbox)
-        ammSle,            # AMM ledger entry
-        ammAccount,        # AMM pseudo-account ID
-        amountBalance,     # Current pool balance of the asset
-        lptAMMBalance,     # Total outstanding LP tokens
-        amount,            # Min asset to receive (or 0 for no min, or asset specifier)
-        lpTokensWithdraw,  # LP tokens to redeem
-        tfee):             # Trading fee (for single-asset withdrawal)
-    # Adjust LP tokens for precision (with fixAMMv1_3)
-    tokensAdj = adjustLPTokensIn(rules, lptAMMBalance, lpTokensWithdraw, isWithdrawAll(tx)) # helpers.md#25-adjustlptokensin-withdrawals
+def singleWithdrawTokens(pool, balance1, balance2, lp_supply, lp_tokens_in, tx, fee):
+    withdraw_all = tx.flags & tfOneAssetWithdrawAll
+    lp_tokens = lp_tokens_in if withdraw_all else adjustLPTokensIn(lp_supply, lp_tokens_in)
+    if lp_tokens == 0:
+        fail(tecAMM_INVALID_TOKENS)
 
-    if rules.enabled(fixAMMv1_3) and tokensAdj == 0:
-        return (tecAMM_INVALID_TOKENS, STAmount{})
+    amount = ammAssetOut(balance1, lp_supply, lp_tokens, fee)
+    if tx.Amount != 0 and amount < tx.Amount:
+        fail(tecAMM_FAILED)
 
-    # Calculate withdrawal amount using ammAssetOut formula
-    amountWithdraw = ammAssetOut(amountBalance, lptAMMBalance, tokensAdj, tfee) # helpers.md#332-ammassetout-equation-8
-
-    # Check if calculated amount meets user's minimum (if specified)
-    if amount == 0 or amountWithdraw >= amount:
-        # Either no minimum specified, or calculated amount meets minimum
-        return withdraw(
-            view,
-            ammSle,
-            ammAccount,
-            amountBalance,
-            amountWithdraw,      # calculated: amount to withdraw
-            None,                # single-asset withdrawal
-            lptAMMBalance,
-            tokensAdj,           # exact: LP tokens to redeem
-            tfee
-        )
-
-    # Calculated amount is less than user's minimum
-    return (tecAMM_FAILED, STAmount{})
+    return withdraw(pool, amount, None, lp_tokens, withdraw_all=withdraw_all)
 ```
 
 ## 5.3. singleWithdrawEPrice (tfLimitLPToken)
@@ -522,72 +275,32 @@ def singleWithdrawTokens(
 
 Withdraw a single asset with an effective price constraint.[^singleWithdrawEPrice]
 
-This mode allows users to control the effective price when redeeming LP tokens, where effective price is defined as the ratio of LP tokens redeemed to asset withdrawn. The user provides `EPrice` (maximum effective price) and optionally `Amount` (minimum withdrawal amount). As with deposits, `EPrice` is an upper bound: the trade is sized so the effective price does not exceed `EPrice`. A lower effective price means a better deal for the withdrawer (fewer LP tokens per asset withdrawn).
+This mode allows users to control the effective price when redeeming LP tokens, where effective price is defined as the ratio of LP tokens redeemed to asset withdrawn. The user provides `EPrice` (maximum effective price) and `Amount`, which names the asset. When `Amount` is not zero, it is the minimum the user accepts. As with deposits, `EPrice` is an upper bound. The trade is sized so the effective price equals `EPrice`, and rounding can move the final amounts slightly off it. A lower effective price means a better deal for the withdrawer (fewer LP tokens per asset withdrawn).
 
-The function solves a derived formula from Equation 8 to calculate the LP tokens that achieve exactly the specified effective price. It then calculates the withdrawal amount as `tokensAdj / ePrice`. If the calculated amount is less than the user's optional `Amount` constraint, the transaction fails with `tecAMM_FAILED`. Under the `fixCleanup3_3_0` amendment, a denominator (`T*f - B*E`) of exactly zero also fails with `tecAMM_FAILED`. Without the amendment that division throws and the transaction fails with `tefEXCEPTION`.
+The function solves a derived formula from Equation 8 to calculate the LP tokens that achieve exactly the specified effective price. It then calculates the withdrawal amount as `tokensAdj / ePrice`. If the calculated amount is less than a non-zero `Amount`, the transaction fails with `tecAMM_FAILED`. Under the `fixCleanup3_3_0` amendment, a denominator (`T*f - B*E`) of exactly zero also fails with `tecAMM_FAILED`. Without the amendment, that division throws. The transaction then fails with `tefEXCEPTION`, or with `tecAMM_FAILED` under `fixCleanup3_4_0`.
 
 [^singleWithdrawEPrice]: AMMWithdraw::singleWithdrawEPrice: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L1119-L1179)
 
 ### 5.3.1. singleWithdrawEPrice Pseudo-Code
 
 ```python
-def singleWithdrawEPrice(
-        view,              # Ledger view (sandbox)
-        ammSle,            # AMM ledger entry
-        ammAccount,        # AMM pseudo-account ID
-        amountBalance,     # Current pool balance of the asset
-        lptAMMBalance,     # Total outstanding LP tokens
-        amount,            # Min asset to receive (or 0 for no min)
-        ePrice,            # Min effective price (LPTokenIn / AssetOut)
-        tfee):             # Trading fee (for single-asset withdrawal)
-    # Calculate intermediate value: B * E (balance * effective price)
-    ae = amountBalance * ePrice
+def singleWithdrawEPrice(pool, balance1, balance2, lp_supply, lp_tokens_in, tx, fee):
+    f = fee / 100_000
+    denominator = lp_supply * f - balance1 * tx.EPrice
+    if denominator == 0:
+        fail(tecAMM_FAILED)
 
-    # Get fee multiplier
-    f = getFee(tfee)  # fee in units of 1/100,000 (e.g., 30 -> 0.0003)
+    # Equation 8 solved for the LP tokens at an effective price of exactly EPrice, before rounding
+    lp_tokens = adjustLPTokensIn(lp_supply, round_up(
+        lp_supply * (lp_supply + balance1 * tx.EPrice * (f - 2)) / denominator))
+    if lp_tokens <= 0:
+        fail(tecAMM_INVALID_TOKENS)
 
-    # Calculate LP tokens using derived formula
-    # t = T*(T + B*E*(f-2)) / (T*f - B*E)
-    tokNoRoundCb = lambda: (
-        lptAMMBalance * (lptAMMBalance + ae * (f - 2)) / (lptAMMBalance * f - ae)
-    )
-    tokProdCb = lambda: (
-        (lptAMMBalance + ae * (f - 2)) / (lptAMMBalance * f - ae)
-    )
+    amount = round_down(lp_tokens / tx.EPrice)
+    if tx.Amount != 0 and amount < tx.Amount:
+        fail(tecAMM_FAILED)
 
-    tokensAdj = getRoundedLPTokens(
-        rules, tokNoRoundCb, lptAMMBalance, tokProdCb, IsDeposit=False) # helpers.md#212-getroundedlptokens-callback-pseudo-code
-
-    if tokensAdj <= 0:
-        if not rules.enabled(fixAMMv1_3):
-            return (tecAMM_FAILED, STAmount{})
-        else:
-            return (tecAMM_INVALID_TOKENS, STAmount{})
-
-    # Calculate withdrawal amount from tokens and effective price
-    # amountWithdraw = tokensAdj / ePrice
-    amtNoRoundCb = lambda: tokensAdj / ePrice
-    amtProdCb = lambda: tokensAdj / ePrice
-
-    amountWithdraw = getRoundedAsset(
-        rules, amtNoRoundCb, amount, amtProdCb, IsDeposit=False) # helpers.md#232-getroundedasset-callback-pseudo-code
-
-    # Check if calculated amount meets user's minimum (if specified)
-    if amount == 0 or amountWithdraw >= amount:
-        return withdraw(
-            view,
-            ammSle,
-            ammAccount,
-            amountBalance,
-            amountWithdraw,      # calculated: amount to withdraw
-            None,                # single-asset withdrawal
-            lptAMMBalance,
-            tokensAdj,           # calculated: LP tokens to redeem
-            tfee
-        )
-
-    # Calculated amount is less than user's minimum
-    return (tecAMM_FAILED, STAmount{})
+    return withdraw(pool, amount, None, lp_tokens)
 ```
 
 # 6. Common Withdraw Function
@@ -596,204 +309,64 @@ The `withdraw()` function[^withdraw] serves as the final common pathway for all 
 
 Under `fixCleanup3_3_0` together with `fixAMMv1_3`, `applyGuts` runs the pool product check described in [Precision and Rounding](helpers.md#2-precision-and-rounding) after the mode handlers return. See the [failure conditions](README.md#332-failure-conditions) for the resulting `tecPRECISION_LOSS`.
 
-[^withdraw]: AMMWithdraw::withdraw: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L479-L749)
+[^withdraw]: AMMWithdraw::withdraw: [AMMWithdraw.cpp](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/tx/transactors/dex/AMMWithdraw.cpp#L537-L818)
 
 This function orchestrates a sequenced validation and execution flow. It begins by verifying the withdrawer holds sufficient LP tokens to redeem, then enforces pool integrity constraints that prevent malformed states. 
 
 The function prohibits one-sided pool withdrawals - situations where all of one asset would be withdrawn while the other remains. When a withdrawal would redeem all outstanding LP tokens, the function mandates that all pool assets must also be withdrawn, preventing orphaned assets in an empty pool.
 
-Before executing transfers, the function checks whether the withdrawer has adequate XRP reserves if new trust lines or MPTokens need creation. For MPTs, this includes verifying proper authorization from the issuer. The function then transfers each withdrawn asset from the AMM account to the withdrawer, waiving transfer fees as AMM operations are privileged. Finally, it burns the redeemed LP tokens by calling `redeemIOU`, which reduces both the withdrawer's LP token balance and the total outstanding token supply.
+Before executing transfers, the function checks whether the withdrawer has adequate XRP reserves if new trust lines or MPTokens need creation. For MPTs, regular withdrawals also verify authorization from the issuer. With `fixCleanup3_4_0`, the AMMClawback path skips the reserve check: clawback takes priority over the reserve, so a holder cannot avoid it by deleting the trust line or MPToken and keeping a low spendable balance. Two other 3.4.0 changes affect MPT withdrawals. The clawback path recreates a missing holder MPToken instead of failing, so the issuer can recover MPT locked in the pool, and auto-authorizes it only for the clawback issuer's own asset, since granting authorization for another issuer's asset would bypass that issuer's `lsfMPTRequireAuth`. The reserve comparison uses the higher of the pre-transaction and current XRP balance for MPTs as well, counting XRP already received earlier in the same withdrawal, as the trust line path always did. The function then transfers each withdrawn asset from the AMM account to the withdrawer, waiving transfer fees as XLS-30 specifies. Finally, it burns the redeemed LP tokens by calling `redeemIOU`, which reduces both the withdrawer's LP token balance and the total outstanding token supply.
 
 ## 6.1. withdraw Pseudo-Code
 
 ```python
-def withdraw(
-        view,              # Ledger view (sandbox)
-        ammSle,            # AMM ledger entry
-        ammAccount,        # AMM pseudo-account ID
-        account,           # Withdrawer account ID
-        amountBalance,     # Current pool balance of asset1
-        amountWithdraw,    # Amount1 to withdraw
-        amount2Withdraw,   # Optional: amount2 to withdraw
-        lpTokensAMMBalance,  # Total outstanding LP tokens
-        lpTokensWithdraw,  # LP tokens to redeem
-        tfee,              # Trading fee
-        freezeHandling,    # How to handle frozen assets
-        authHandling,      # How to handle unauthorized MPT holders
-        withdrawAll,       # Whether this is a complete withdrawal
-        priorBalance:      # Withdrawer's prior XRP balance
-    # Get withdrawer's current LP token balance
-    lpTokens = ammLPHolds(view, ammSle, account, journal)
+def withdraw(pool, amount1, amount2, lp_tokens, withdraw_all=False, clawback_issuer=None):
+    clawback = clawback_issuer is not None
+    # Read as in section 2. Clawback reads through freezes and missing authorization.
+    balance1, balance2 = pool.balances(amount1.asset)
 
-    # Get current pool balances (accounting for freezes and authorization)
-    currentBalances = ammHolds(view, ammSle, amountWithdraw.issue, None, freezeHandling, authHandling)
-    if not currentBalances:
-        return (currentBalances.error(), STAmount{}, STAmount{}, STAmount{})
+    if lp_tokens <= 0 or lp_tokens > pool.lp_tokens_of(withdrawer):
+        fail(tecAMM_INVALID_TOKENS)
+    # Never empty one side of the pool while the other keeps a balance
+    if (amount1 == balance1) != (amount2 == balance2):
+        fail(tecAMM_BALANCE)
+    # Redeeming every LP token must take both full balances
+    if lp_tokens == pool.lp_token_supply and (amount1 != balance1 or amount2 != balance2):
+        fail(tecAMM_BALANCE)
+    if amount1 > balance1 or (amount2 is not None and amount2 > balance2):
+        fail(tecAMM_BALANCE)
 
-    curBalance, curBalance2, _ = currentBalances
+    # With MPTokensV2: afterwards, the balances and the LP tokens are all zero or all non-zero.
+    # A single-asset withdrawal ignores the other side, which can read as zero when frozen.
+    if MPTokensV2:
+        emptied = [amount1 == balance1, lp_tokens == pool.lp_token_supply]
+        if amount2 is not None:
+            emptied.append(amount2 == balance2)
+        if any(emptied) and not all(emptied):
+            fail(tecAMM_BALANCE)
 
-    # Adjust amounts for precision (with fixAMMv1_3, this shouldn't be needed as we have already adjusted and rounded all numbers properly)
-    # When withdrawing all, skip adjustment and use exact values
-    if withdrawAll == No:
-        amountWithdrawActual, amount2WithdrawActual, lpTokensWithdrawActual = \
-            adjustAmountsByLPTokens(
-                amountBalance,
-                amountWithdraw,
-                amount2Withdraw,
-                lpTokensAMMBalance,
-                lpTokensWithdraw,
-                tfee,
-                IsDeposit=False
-            )
-    else:
-        amountWithdrawActual = amountWithdraw
-        amount2WithdrawActual = amount2Withdraw
-        lpTokensWithdrawActual = lpTokensWithdraw
+    for amount in [amount1, amount2]:
+        if amount is None:  # single-asset withdrawal
+            continue
+        if not amount.is_xrp and not withdrawer.has_trust_line_or_mptoken(amount.asset):
+            # Clawback takes priority over the reserve, so a holder cannot avoid it
+            # by deleting the trust line or MPToken and keeping a low balance
+            if not (fixCleanup3_4_0 and clawback):
+                # The first two owned objects need no reserve, as in TrustSet.
+                # The higher balance counts XRP received earlier in this withdrawal.
+                if (withdrawer.owner_count >= 2 and
+                        max(withdrawer.xrp_before_tx, withdrawer.xrp) < reserve(withdrawer.owner_count + 1)):
+                    fail(tecINSUFFICIENT_RESERVE)
+            if amount.is_mpt and withdrawer != amount.issuer:
+                flags = 0
+                if requireAuth(withdrawer, amount.asset) != tesSUCCESS:
+                    # Only clawback gets here. An issuer can authorize only its own asset,
+                    # so another issuer's MPToken is recreated unauthorized.
+                    if amount.issuer == clawback_issuer:
+                        flags = lsfMPTAuthorized
+                create_mptoken(withdrawer, amount.asset, flags)
+        send(amount, from_=pool.account, to=withdrawer, transfer_fee=False)
 
-    # Validate LP tokens
-    if lpTokensWithdrawActual <= 0 or lpTokensWithdrawActual > lpTokens:
-        return (tecAMM_INVALID_TOKENS, STAmount{}, STAmount{}, STAmount{})
-
-    # With fixAMMv1_1: Additional validation
-    if rules.enabled(fixAMMv1_1) and lpTokensWithdrawActual > lpTokensAMMBalance:
-        return (tecINTERNAL, STAmount{}, STAmount{}, STAmount{})
-
-    # Prevent one-sided pool withdrawal
-    # If withdrawing all of one asset but not the other, fail
-    # This ensures pools are always balanced (or completely empty)
-    if (amountWithdrawActual == curBalance and amount2WithdrawActual != curBalance2) or \
-       (amount2WithdrawActual == curBalance2 and amountWithdrawActual != curBalance):
-        return (tecAMM_BALANCE, STAmount{}, STAmount{}, STAmount{})
-
-    # If redeeming all LP tokens, must withdraw all assets
-    # This prevents situations where LP tokens are zero but assets remain
-    if lpTokensWithdrawActual == lpTokensAMMBalance and \
-       (amountWithdrawActual != curBalance or amount2WithdrawActual != curBalance2):
-        return (tecAMM_BALANCE, STAmount{}, STAmount{}, STAmount{})
-
-    # Check withdrawal doesn't exceed pool balance
-    if amountWithdrawActual > curBalance or amount2WithdrawActual > curBalance2:
-        return (tecAMM_BALANCE, STAmount{}, STAmount{}, STAmount{})
-
-    # With featureMPTokensV2: the post-withdrawal pool state must be consistent
-    # (all balances zero or all non-zero, agreeing with the LP token total)
-    if rules.enabled(featureMPTokensV2):
-        newBalanceZero = (curBalance - amountWithdrawActual) == 0
-        newBalance2Zero = (curBalance2 - amount2WithdrawActual) == 0
-        newLPTokensZero = (lpTokensAMMBalance - lpTokensWithdrawActual) == 0
-        if amount2WithdrawActual is None:
-            valid = (newBalanceZero == newLPTokensZero)
-        else:
-            valid = (newBalanceZero == newBalance2Zero and newBalance2Zero == newLPTokensZero)
-        if not valid:
-            return (tecAMM_BALANCE, STAmount{}, STAmount{}, STAmount{})
-
-    # Helper function to check reserve requirements (with fixAMMv1_2)
-    # Checks if withdrawer has sufficient XRP reserve for trust line or MPToken creation
-    def sufficientReserve(asset):
-        if not rules.enabled(fixAMMv1_2) or isXRP(asset):
-            return (tesSUCCESS, None)
-
-        # Check if trust line (for IOUs) or MPToken (for MPTs) exists
-        if isIOU(asset):
-            assetExists = view.exists(keylet.line(account, asset.issue))
-            mptokenKey = None
-        else:  # MPT
-            issuanceKey = keylet.mptIssuance(asset.mptID)
-            mptokenKey = keylet.mptoken(issuanceKey, account)
-            assetExists = view.exists(mptokenKey)
-            if assetExists:
-                mptokenKey = None  # Already exists, no need to create
-
-        if not assetExists:
-            sleAccount = view.peek(keylet.account(account))
-            if not sleAccount:
-                return (tecINTERNAL, None)
-
-            balance = sleAccount[sfBalance].xrp
-            ownerCount = sleAccount[sfOwnerCount]
-
-            reserve = view.fees().accountReserve(ownerCount + 1) if ownerCount >= 2 else 0
-
-            # For IOUs: use max of prior and current balance
-            # For MPTs: use prior balance only
-            balanceToCheck = max(priorBalance, balance) if isIOU(asset) else priorBalance
-
-            if balanceToCheck < reserve:
-                return (tecINSUFFICIENT_RESERVE, None)
-
-        return (tesSUCCESS, mptokenKey)
-
-    # Helper function to create MPToken if needed
-    def createMPToken(asset, mptokenKey):
-        if mptokenKey and account != asset.getIssuer():
-            # Must authorize MPToken
-            if requireAuth(view, asset.mptIssue, account, WeakAuth) != tesSUCCESS:
-                return err
-
-            if checkCreateMPT(view, asset.mptIssue, account, journal) != tesSUCCESS:
-                return err
-
-        return tesSUCCESS
-
-    # Check reserve and create MPToken for asset1
-    result, mptokenKey = sufficientReserve(amountWithdrawActual.asset)
-    if result != tesSUCCESS:
-        return (result, STAmount{}, STAmount{}, STAmount{})
-
-    result = createMPToken(amountWithdrawActual.asset, mptokenKey)
-    if result != tesSUCCESS:
-        return (result, STAmount{}, STAmount{}, STAmount{})
-
-    # Transfer asset1 from AMM to withdrawer
-    result = accountSend(
-        view,
-        ammAccount,           # from: AMM pseudo-account
-        account,              # to: withdrawer
-        amountWithdrawActual, # amount
-        WaiveTransferFee=Yes  # AMM withdrawals don't pay transfer fees
-    )
-    if result != tesSUCCESS:
-        return (result, STAmount{}, STAmount{}, STAmount{})
-
-    # If two-asset withdrawal, check reserve, create MPToken, and transfer asset2
-    if amount2WithdrawActual:
-        # Check reserve and create MPToken for asset2
-        result, mptokenKey = sufficientReserve(amount2WithdrawActual.asset)
-        if result != tesSUCCESS:
-            return (result, STAmount{}, STAmount{}, STAmount{})
-
-        result = createMPToken(amount2WithdrawActual.asset, mptokenKey)
-        if result != tesSUCCESS:
-            return (result, STAmount{}, STAmount{}, STAmount{})
-
-        result = accountSend(
-            view,
-            ammAccount,
-            account,
-            amount2WithdrawActual,
-            WaiveTransferFee=Yes
-        )
-        if result != tesSUCCESS:
-            return (result, STAmount{}, STAmount{}, STAmount{})
-
-    # Redeem (burn) LP tokens
-    # This decreases the trust line balance and may delete the trust line
-    result = redeemIOU(
-        view,
-        account,
-        lpTokensWithdrawActual,
-        lpTokensWithdrawActual.issue,
-        journal
-    )
-    if result != tesSUCCESS:
-        return (result, STAmount{}, STAmount{}, STAmount{})
-
-    # Return success with new LP token balance and actual withdrawal amounts
-    return (
-        tesSUCCESS,
-        lpTokensAMMBalance - lpTokensWithdrawActual,
-        amountWithdrawActual,
-        amount2WithdrawActual
-    )
+    burn(lp_tokens, from_=withdrawer)
+    return pool.lp_token_supply - lp_tokens
 ```

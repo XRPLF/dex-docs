@@ -139,6 +139,10 @@ Trust lines can be created or modified with certain pseudo-accounts as the desti
 The TrustSet transaction never creates, deletes, or modifies the pseudo-account itself - it only creates or modifies
 the `RippleState` entry that represents the trust line relationship.
 
+A pseudo-account counts as authorized on a trust line to an issuer that has `lsfRequireAuth`, even without the issuer's authorization flag on its side, because a pseudo-account cannot submit transactions and only holds assets for the object that owns it. The trust line must still exist.[^tl-pseudo-auth]
+
+[^tl-pseudo-auth]: [`RippleStateHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.4.0/src/libxrpl/ledger/helpers/RippleStateHelpers.cpp#L569-L601)
+
 ### 2.1.4. Ownership
 
 A `RippleState` ledger entry is jointly owned by both participating accounts. When a trust line is created, it is added to the owner directory of both the low account and the high account.
@@ -154,14 +158,7 @@ The `sfLowNode` and `sfHighNode` fields in the `RippleState` entry store the dir
 
 Every non-default trust line increments the account's `OwnerCount`, which raises its reserve requirement. The `TrustSet` transaction enforces that incremental reserve only when the account already owns two or more objects; while it owns fewer than two, a new trust line is allowed even if the account's balance would not cover the extra reserve (this lets a gateway fund new users cheaply).
 
-An account's side of a trust line requires a reserve when any of the following are in a non-default state:
-
-- **QualityIn** is set (non-zero)
-- **QualityOut** is set (non-zero)
-- **NoRipple flag** differs from the account's default ripple setting
-- **Freeze flag** is set
-- **Limit** is non-zero
-- **Balance** is positive (account holds IOUs)
+An account's side of a trust line requires a reserve when that side is not in its [default state](#11-default-state).
 
 When a trust line side transitions from default to non-default state, the `lsfLowReserve` or `lsfHighReserve` flag is
 set and the account's `OwnerCount` is incremented. When all parameters return to default state, the reserve flag is
@@ -178,8 +175,6 @@ Under the `Sponsor` amendment, the reserve for the source account's side of a tr
 ### 3.1.1. TrustSet Transaction
 
 The `TrustSet` transaction creates, modifies or deletes a `RippleState` ledger entry and manages the corresponding `DirectoryNode` entries.
-
-When a trust line is created or deleted, it affects the owner directories of both participating accounts. Each account maintains an owner directory that tracks all ledger objects it owns, including its trust lines. The `sfLowNode` and `sfHighNode` fields in the `RippleState` entry store the page numbers where the trust line appears in each account's owner directory
 
 | Field Name        |     Required?     | Modifiable? | JSON Type | Internal Type | Default Value | Description                                                                                                                         |
 |-------------------|:-----------------:|:-----------:|:---------:|:-------------:|:-------------:|:------------------------------------------------------------------------------------------------------------------------------------|
@@ -223,6 +218,7 @@ to [TrustSet Flags](https://xrpl.org/docs/references/protocol/transactions/types
 - `tecNO_DST`: the [AMM](https://xrpl.org/resources/known-amendments#amm) or [SingleAssetVault](https://xrpl.org/resources/known-amendments#singleassetvault) amendment is enabled and the destination (issuer) account does not exist.
 - `tecNO_PERMISSION`: the destination account has the `lsfDisallowIncomingTrustline` flag set:
     - If the trust line already exists, do not fail (the [fixDisallowIncomingV1](https://xrpl.org/resources/known-amendments#fixdisallowincomingv1) amendment that introduced this exemption was retired, so it applies unconditionally).
+    - OfferCreate also refuses to create such a trust line implicitly through offer crossing (see [OfferCreate Failure Conditions](../offers/README.md#3111-failure-conditions)).
 - If the destination account is a pseudo-account:
     - `sfAMMID`: destination is an AMM account (has `sfAMMID` field), but the trust line does not already exist between source and AMM.
             - `tecAMM_EMPTY`: AMM has zero LP IOUs - cannot create trust lines to empty AMMs.
@@ -293,7 +289,7 @@ to [TrustSet Flags](https://xrpl.org/docs/references/protocol/transactions/types
       - If either directory is full, the transaction fails with `tecDIR_FULL`.
     - NoRipple flags are initialized on both sides of the trust line[^trustcreate-noripple]:
       - The source account's NoRipple flag (`lsfLowNoRipple` or `lsfHighNoRipple`) is set if the TrustSet transaction contains `tfSetNoRipple` and not `tfClearNoRipple`[^trustcreate-noripple-src].
-      - The destination account's NoRipple flag is set if the destination account does **not** have `lsfDefaultRipple` on their account[^trustcreate-noripple-dst]. `lsfDefaultRipple` is an account-level flag set via AccountSet (`asfDefaultRipple`). When an issuer sets `lsfDefaultRipple`, new trust lines are created without NoRipple on the issuer's side, allowing rippling by default.
+      - The destination account's NoRipple flag is set if the destination account does **not** have `lsfDefaultRipple`[^trustcreate-noripple-dst].
 
 [^modify-then-delete]: Default state check and deletion after modification: [`TrustSet.cpp`](https://github.com/XRPLF/rippled/blob/3.3.0/src/libxrpl/tx/transactors/token/TrustSet.cpp#L617-L622)
 [^trustcreate-noripple]: NoRipple initialization in trustCreate: [`RippleStateHelpers.cpp`](https://github.com/XRPLF/rippled/blob/3.2.0/src/libxrpl/ledger/helpers/RippleStateHelpers.cpp#L264-L281)
